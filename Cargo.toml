@@ -15,6 +15,10 @@ crate-type = ["lib"]
 name = "poke-engine"
 path = "src/main.rs"
 
+[[bench]]
+name = "mcts_bench"
+harness = false
+
 [profile.release]
 debug = 1
 
@@ -22,6 +26,10 @@ debug = 1
 dashmap = "6.1.0"
 clap = { version = "4.5.4", features = ["derive"] }
 rand = "0.9.1"
+
+[dev-dependencies]
+foldhash = { version = "0.2.0", default-features = false }
+memory-stats = "1.2.0"
 
 [features]
 remove_low_chance_instructions = []

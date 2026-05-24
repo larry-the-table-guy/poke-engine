@@ -7,12 +7,16 @@ use rand::distr::weighted::WeightedIndex;
 use rand::prelude::*;
 use rand::rng;
 use std::collections::HashMap;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 fn sigmoid(x: f32) -> f32 {
     // Tuned so that ~200 points is very close to 1.0
     1.0 / (1.0 + (-0.0125 * x).exp())
 }
+
+pub type ChildMapK = (usize, usize, usize);
+pub type ChildMapV = Vec<Node>;
+pub type ChildMap = HashMap<ChildMapK, ChildMapV>;
 
 #[derive(Debug)]
 pub struct Node {
@@ -82,7 +86,7 @@ impl Node {
     pub unsafe fn selection(
         &mut self,
         state: &mut State,
-        children: &mut HashMap<(usize, usize, usize), Vec<Node>>,
+        children: &mut ChildMap,
     ) -> (*mut Node, usize, usize) {
         if self.s1_options.is_none() {
             let (s1_options, s2_options) = state.get_all_options();
@@ -120,7 +124,7 @@ impl Node {
         state: &mut State,
         s1_move_index: usize,
         s2_move_index: usize,
-        children: &mut HashMap<(usize, usize, usize), Vec<Node>>,
+        children: &mut ChildMap,
     ) -> *mut Node {
         let s1_move = &self.s1_options.as_ref().unwrap()[s1_move_index].move_choice;
         let s2_move = &self.s2_options.as_ref().unwrap()[s2_move_index].move_choice;
@@ -237,12 +241,22 @@ fn do_mcts(
     root_node: &mut Node,
     state: &mut State,
     root_eval: &f32,
-    children: &mut HashMap<(usize, usize, usize), Vec<Node>>,
+    children: &mut ChildMap,
+    timers: &mut Timers,
 ) {
+    let t0 = Instant::now();
     let (mut new_node, s1_move, s2_move) = unsafe { root_node.selection(state, children) };
+    let t1 = Instant::now();
     new_node = unsafe { (*new_node).expand(state, s1_move, s2_move, children) };
+    let t2 = Instant::now();
     let rollout_result = unsafe { (*new_node).rollout(state, root_eval) };
+    let t3 = Instant::now();
     unsafe { (*new_node).backpropagate(rollout_result, state) }
+    let t4 = Instant::now();
+    timers.selection += t1.duration_since(t0).as_nanos() as u64;
+    timers.expand += t2.duration_since(t1).as_nanos() as u64;
+    timers.rollout += t3.duration_since(t2).as_nanos() as u64;
+    timers.backpropagate += t4.duration_since(t3).as_nanos() as u64;
 }
 
 pub fn perform_mcts(
@@ -251,18 +265,52 @@ pub fn perform_mcts(
     side_two_options: Vec<MoveChoice>,
     max_time: Duration,
 ) -> MctsResult {
-    let mut root_node = Node::new();
+    perform_mcts_inner(state, side_one_options, side_two_options, max_time).0
+}
+
+/// Cumulative nanoseconds spent in each step of MCTS
+#[derive(Default, Clone, Debug)]
+#[repr(C)]
+pub struct Timers {
+    pub selection: u64,
+    pub expand: u64,
+    pub rollout: u64,
+    pub backpropagate: u64,
+}
+impl Timers {
+    pub fn add(&mut self, other: &Timers) {
+        self.selection += other.selection;
+        self.expand += other.expand;
+        self.rollout += other.rollout;
+        self.backpropagate += other.backpropagate;
+    }
+}
+
+pub fn perform_mcts_inner(
+    state: &mut State,
+    side_one_options: Vec<MoveChoice>,
+    side_two_options: Vec<MoveChoice>,
+    max_time: Duration,
+) -> (MctsResult, Box<Node>, Timers, ChildMap) {
+    let mut timers = Timers::default();
+    let mut root_node = Box::new(Node::new());
     unsafe {
         root_node.populate(side_one_options, side_two_options);
     }
     root_node.root = true;
-    let mut children: HashMap<(usize, usize, usize), Vec<Node>> = HashMap::new();
+    let mut children: ChildMap = ChildMap::new();
 
     let root_eval = evaluate(state);
-    let start_time = std::time::Instant::now();
+    let start_time = Instant::now();
     while start_time.elapsed() < max_time {
         for _ in 0..1000 {
-            do_mcts(&mut root_node, state, &root_eval, &mut children);
+            do_mcts(
+                &mut root_node,
+                state,
+                &root_eval,
+                &mut children,
+                &mut timers,
+            );
         }
 
         /*
@@ -281,7 +329,6 @@ pub fn perform_mcts(
             break;
         }
     }
-
     let result = MctsResult {
         s1: root_node
             .s1_options
@@ -308,5 +355,5 @@ pub fn perform_mcts(
         iteration_count: root_node.times_visited,
     };
 
-    result
+    (result, root_node, timers, children)
 }

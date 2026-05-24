@@ -2,7 +2,7 @@ use crate::engine::evaluate::evaluate;
 use crate::engine::generate_instructions::generate_instructions_from_move_pair;
 use crate::engine::state::MoveChoice;
 use crate::instruction::StateInstructions;
-use crate::mcts::{MctsResult, MctsSideResult};
+use crate::mcts::{MctsResult, MctsSideResult, Timers};
 use crate::state::State;
 use dashmap::DashMap;
 use rand::prelude::*;
@@ -18,10 +18,12 @@ const MCTS_DAMAGE_BRANCH_DEPTH: u8 = 2;
 const SCORE_SCALE: f32 = 400.0;
 const VIRTUAL_LOSS_VISITS: u32 = 3;
 
+pub type ChildMapK = (usize, usize, usize);
+pub type ChildMapV = SharedBranch;
 // Node map type alias for clarity.
 // key: (parent node address, s1_move_index, s2_move_index)
 // value: the branch (weighted list of outcome nodes for that move pair)
-type ChildMap = DashMap<(usize, usize, usize), SharedBranch>;
+pub type ChildMap = DashMap<ChildMapK, ChildMapV>;
 
 fn sigmoid(x: f32) -> f32 {
     // Tuned so that ~200 points is very close to 1.0
@@ -73,8 +75,8 @@ impl MoveNode {
 }
 
 pub struct SharedNodeOptions {
-    s1: Vec<MoveNode>,
-    s2: Vec<MoveNode>,
+    pub s1: Vec<MoveNode>,
+    pub s2: Vec<MoveNode>,
 }
 
 impl SharedNodeOptions {
@@ -87,8 +89,8 @@ impl SharedNodeOptions {
 }
 
 pub struct SharedBranch {
-    nodes: Vec<Arc<Node>>,
-    total_weight: f32,
+    pub nodes: Vec<Arc<Node>>,
+    pub total_weight: f32,
 }
 
 impl SharedBranch {
@@ -115,12 +117,12 @@ struct PathStep {
 }
 
 pub struct Node {
-    root: bool,
-    instructions: StateInstructions,
-    depth: u8,
-    times_visited: AtomicU32,
+    pub root: bool,
+    pub instructions: StateInstructions,
+    pub depth: u8,
+    pub times_visited: AtomicU32,
     virtual_losses: AtomicI8,
-    options: OnceLock<SharedNodeOptions>,
+    pub options: OnceLock<SharedNodeOptions>,
 }
 
 impl Node {
@@ -313,16 +315,20 @@ fn do_mcts<R: Rng + ?Sized>(
     rng: &mut R,
     children: &ChildMap,
     path: &mut Vec<PathStep>,
+    timers: &mut Timers,
 ) {
     path.clear();
 
+    let selection_start = Instant::now();
     let (leaf, s1_index, s2_index) = Node::selection(root, state, rng, children, path);
+    let selection_end = Instant::now();
 
     let options = leaf.options.get().expect("options set during selection");
     options.s1[s1_index].add_virtual_loss();
     options.s2[s2_index].add_virtual_loss();
     let expanded = leaf.expand(state, s1_index, s2_index, rng, children);
-    match expanded {
+    let expand_end = Instant::now();
+    let rollout_target = match expanded {
         Some(child) => {
             child.virtual_losses.fetch_add(1, Ordering::AcqRel);
             state.apply_instructions(&child.instructions.instruction_list);
@@ -332,10 +338,7 @@ fn do_mcts<R: Rng + ?Sized>(
                 s1_index,
                 s2_index,
             });
-
-            let score = child.rollout(state, root_eval);
-
-            Node::backpropagate(path, &child, score, state);
+            child
         }
 
         // if expansion returns None,
@@ -346,12 +349,17 @@ fn do_mcts<R: Rng + ?Sized>(
             // remove the virtual loss we added before expansion, since we're not actually expanding
             options.s1[s1_index].remove_virtual_loss();
             options.s2[s2_index].remove_virtual_loss();
-
-            let score = leaf.rollout(state, root_eval);
-
-            Node::backpropagate(path, &leaf, score, state);
+            leaf
         }
-    }
+    };
+    let score = rollout_target.rollout(state, root_eval);
+    let rollout_end = Instant::now();
+    Node::backpropagate(path, &rollout_target, score, state);
+    let backpropagate_end = Instant::now();
+    timers.selection += selection_end.duration_since(selection_start).as_nanos() as u64;
+    timers.expand += expand_end.duration_since(selection_end).as_nanos() as u64;
+    timers.rollout += rollout_end.duration_since(expand_end).as_nanos() as u64;
+    timers.backpropagate += backpropagate_end.duration_since(rollout_end).as_nanos() as u64;
 }
 
 pub fn perform_mcts_shared_tree(
@@ -361,6 +369,24 @@ pub fn perform_mcts_shared_tree(
     max_time: Duration,
     worker_count: usize,
 ) -> MctsResult {
+    perform_mcts_shared_tree_inner(
+        state,
+        side_one_options,
+        side_two_options,
+        max_time,
+        worker_count,
+    )
+    .0
+}
+
+pub fn perform_mcts_shared_tree_inner(
+    state: &mut State,
+    side_one_options: Vec<MoveChoice>,
+    side_two_options: Vec<MoveChoice>,
+    max_time: Duration,
+    worker_count: usize,
+) -> (MctsResult, Arc<Node>, Timers, ChildMap) {
+    let mut timers = vec![Timers::default(); worker_count];
     let root_eval = evaluate(state);
     let deadline = Instant::now() + max_time;
     let root = Node::new_root(side_one_options, side_two_options);
@@ -370,7 +396,7 @@ pub fn perform_mcts_shared_tree(
     let children: Arc<ChildMap> = Arc::new(DashMap::with_capacity(1 << 16));
 
     thread::scope(|scope| {
-        for _ in 0..worker_count {
+        for timer in timers.iter_mut() {
             let root = root.clone();
             let started_iterations = started_iterations.clone();
             let children = children.clone();
@@ -400,15 +426,20 @@ pub fn perform_mcts_shared_tree(
                         &mut rng,
                         &children,
                         &mut path,
+                        timer,
                     );
                     iterations_until_deadline_check -= 1;
                 }
             });
         }
     });
+    let timers = timers.into_iter().fold(Timers::default(), |mut acc, t| {
+        acc.add(&t);
+        acc
+    });
 
     let options = root.options.get().expect("root options initialized");
-    MctsResult {
+    let result = MctsResult {
         s1: options
             .s1
             .iter()
@@ -428,5 +459,6 @@ pub fn perform_mcts_shared_tree(
             })
             .collect(),
         iteration_count: root.times_visited.load(Ordering::Acquire),
-    }
+    };
+    (result, root, timers, Arc::into_inner(children).unwrap())
 }
