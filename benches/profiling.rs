@@ -246,20 +246,20 @@ impl Histogram {
     pub fn deserialize<'a>(&mut self, buf: &'a [u8]) -> Result<&'a [u8], ()> {
         const W: usize = size_of::<u64>();
         let (len, rest) = buf.split_first_chunk::<W>().ok_or(())?;
-        let len = u64::from_le_bytes(*len) as usize;
+        let len = u64::from_ne_bytes(*len) as usize;
         let (data, rest) = rest.split_at_checked(2 * W * len).ok_or(())?;
         for [k, v] in data.as_chunks::<W>().0.as_chunks::<2>().0 {
-            self.add(u64::from_le_bytes(*k), u64::from_le_bytes(*v) as usize);
+            self.add(u64::from_ne_bytes(*k), u64::from_ne_bytes(*v) as usize);
         }
         Ok(rest)
     }
     pub fn serialize(&self, out: &mut Vec<u8>) {
         out.reserve(1 + self.len() * 2 * size_of::<u64>());
-        out.extend_from_slice(&(self.len() as u64).to_le_bytes());
+        out.extend_from_slice(&(self.len() as u64).to_ne_bytes());
         out.extend(
             self.0
                 .iter()
-                .flat_map(|(k, v)| [(*k as u64).to_le_bytes(), (*v as u64).to_le_bytes()].concat()),
+                .flat_map(|(k, v)| [(*k as u64).to_ne_bytes(), (*v as u64).to_ne_bytes()].concat()),
         );
     }
 
