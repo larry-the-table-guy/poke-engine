@@ -550,8 +550,8 @@ fn diff(reports: &[Report]) {
         let tot_expand = stats.expand_ms.weighted_sum() as f64;
         let tot_rollout = stats.rollout_ms.weighted_sum() as f64;
         let tot_backpropagate = stats.backpropagate_ms.weighted_sum() as f64;
-        let tot_unaccounted_time =
-            total_time_ms - tot_selection - tot_expand - tot_rollout - tot_backpropagate;
+        let tot_unaccounted_time = total_time_ms
+            - (tot_selection + tot_expand + tot_rollout + tot_backpropagate) / n_threads as f64;
         // TODO: moar properties
         #[rustfmt::skip]
         let a = [
