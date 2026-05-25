@@ -9,7 +9,7 @@ use poke_engine::{mcts, mcts_threaded};
 
 use foldhash::quality as fhash;
 
-use profiling::{DisplayType, HistList};
+use profiling::{DisplayType, Stats};
 
 mod profiling;
 
@@ -123,7 +123,7 @@ fn bench_mcts(
     output_mode: ReportBackend,
     max_time: Duration,
 ) {
-    let mut stats = HistList::new();
+    let mut stats = Stats::new();
     let mut at_least_one = false;
 
     for line in std::io::stdin()
@@ -192,7 +192,7 @@ fn bench_mcts(
     output(output_mode, stats_type, &header, &stats);
 }
 
-fn output(output_mode: ReportBackend, stats_type: StatsType, header: &BinHeader, stats: &HistList) {
+fn output(output_mode: ReportBackend, stats_type: StatsType, header: &BinHeader, stats: &Stats) {
     match (output_mode, stats_type) {
         (_, StatsType::None) => return,
         (ReportBackend::Markdown, stats_type) => {
@@ -290,7 +290,7 @@ impl ElemSizes {
 // TODO: maybe extend diff and remove this
 // adding more props to diff isn't that hard, less total code.
 // just a question of presentation
-fn pretty_print(stats_type: StatsType, header: &BinHeader, stats: &HistList) {
+fn pretty_print(stats_type: StatsType, header: &BinHeader, stats: &Stats) {
     println!("# Samples Summary\n");
 
     if let Some(count) = header.num_threads {
@@ -299,7 +299,7 @@ fn pretty_print(stats_type: StatsType, header: &BinHeader, stats: &HistList) {
         println!("single-threaded")
     }
 
-    println!("\n<details><summary>State Hashes</summary>\n\n```");
+    println!("\n<details><summary><h2>State Hashes</h2></summary>\n\n```");
     for (state_hash, count) in stats.state_hash.iter() {
         println!("{state_hash:16x} | {count}")
     }
@@ -459,12 +459,13 @@ fn pretty_print(stats_type: StatsType, header: &BinHeader, stats: &HistList) {
     // println!("\n");
     // println!("# Time Breakdown\n");
 
-    println!("\n\n# Histograms\n");
+    println!("\n\n<details><summary><h1>Histograms</h1></summary>\n");
 
     render_hists(&[("", &header, &stats)]);
+    println!("\n</details>");
 }
 
-type Report<'a> = (&'a str, &'a BinHeader, &'a HistList);
+type Report<'a> = (&'a str, &'a BinHeader, &'a Stats);
 
 fn diff(reports: &[Report]) {
     let Some((baseline, others)) = reports.split_first() else {
@@ -493,13 +494,13 @@ fn diff(reports: &[Report]) {
     }
     println!("\n");
 
-    println!("# Summary\n");
+    println!("<details><summary><h1>Summary</h1></summary>\n");
 
     print!("| {:^25} | {:^14} |", "Property", "Baseline",);
     for other in others {
         print!(
-            " {:^14.14} | {:^14} | {:^14} |",
-            other.0, "Change", "% Change"
+            " {:^14.14} | {:^14} | {:^8} |",
+            other.0, "Change", "Relative"
         );
     }
     println!();
@@ -509,20 +510,21 @@ fn diff(reports: &[Report]) {
             "{}:|{}:|{}:|",
             "-".repeat(15),
             "-".repeat(15),
-            "-".repeat(15)
+            "-".repeat(9)
         );
     }
     println!();
 
     // TODO: replace pretty-print with this
     // types of histograms
+    // TODO: add some line breaks, hard to read as it gets longer
     // T0: low-to-high: prefix sum etc
     // T1: subcomponents: show pct total
     // T2: others normalized by iter|sample|thread
     // T3: some may want standard deviation or other
 
     // TODO: maybe a tag on each property so they can be filtered by diff flags
-    fn prop_fn(r: &Report) -> [(&'static str, f64); 23] {
+    fn prop_fn(r: &Report) -> [(&'static str, f64); 22] {
         let bh = &r.1;
         let es = &bh.elem_sizes;
         let stats = &r.2;
@@ -553,7 +555,6 @@ fn diff(reports: &[Report]) {
         // TODO: moar properties
         #[rustfmt::skip]
         let a = [
-            ("Version", bh.version as f64),
             ("Threads", bh.num_threads.map(NonZeroU32::get).unwrap_or_default() as f64),
             ("size(ChildMapKV)", es.child_map_kv as f64),
             ("size(Node)", es.node as f64),
@@ -589,13 +590,13 @@ fn diff(reports: &[Report]) {
         for o_v in other_props.iter() {
             let o_v = o_v[prop_idx];
             let change = o_v - baseline_v;
-            let pct_change = 100f64 * (change / baseline_v);
+            let relative = o_v / baseline_v;
             // TODO: maybe an option to leave change column blank when identical
-            print!(" {:14.2} | {:+14.2} | {:+14.2} |", o_v, change, pct_change);
+            print!(" {:14.2} | {:+14.2} | {:8.3} |", o_v, change, relative);
         }
         println!();
     }
-    println!();
+    println!("\n</details>\n");
 
     println!("# Histograms\n");
 
@@ -603,10 +604,8 @@ fn diff(reports: &[Report]) {
 }
 
 fn render_hists(reports: &[Report]) {
-    for (hist_idx, (hist_name, display_type)) in HistList::LABELS
-        .iter()
-        .zip(HistList::DISPLAY_TYPE)
-        .enumerate()
+    for (hist_idx, (hist_name, display_type)) in
+        Stats::LABELS.iter().zip(Stats::DISPLAY_TYPE).enumerate()
     {
         if *display_type == DisplayType::Skip {
             continue;
@@ -616,7 +615,7 @@ fn render_hists(reports: &[Report]) {
         if *display_type != DisplayType::Seq {
             continue;
         }
-        println!("## {hist_name}\n");
+        println!("<details><summary><h2><code>{hist_name}</code></h2></summary>\n");
 
         print!("|    Key    |");
         for idx in 0..reports.len() {
@@ -659,11 +658,11 @@ fn render_hists(reports: &[Report]) {
             }
             println!();
         }
-        println!();
+        println!("\n</details>\n");
     }
 }
 
-fn binary_serialize(header: &BinHeader, stats: &HistList) {
+fn binary_serialize(header: &BinHeader, stats: &Stats) {
     let mut scratch_buf = Vec::<u8>::with_capacity(4096 * 4);
 
     scratch_buf.extend_from_slice(unsafe {
@@ -682,7 +681,7 @@ fn binary_serialize(header: &BinHeader, stats: &HistList) {
 }
 
 // TODO: replace panic with Result, I guess
-fn binary_deserialize(data: &[u8]) -> (BinHeader, HistList) {
+fn binary_deserialize(data: &[u8]) -> (BinHeader, Stats) {
     let (header, rest) = data.split_at(size_of::<BinHeader>());
     let mut header = unsafe { header.as_ptr().cast::<BinHeader>().read_unaligned() };
     let recorded_header_checksum = header.header_checksum;
@@ -697,7 +696,7 @@ fn binary_deserialize(data: &[u8]) -> (BinHeader, HistList) {
         "header checksum mismatch.",
     );
 
-    let mut stats = HistList::new();
+    let mut stats = Stats::new();
     let mut rest = rest;
     for hist in stats.as_array_mut() {
         rest = hist.deserialize(rest).unwrap();

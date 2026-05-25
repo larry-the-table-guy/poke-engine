@@ -3,14 +3,129 @@
 use poke_engine::mcts::Timers;
 use std::collections::BTreeMap;
 
-/// Basic stats about a single sample of MCTS
-impl HistList {
+/// How a histogram should be displayed
+#[derive(Copy, Clone, PartialEq, Eq)]
+pub enum DisplayType {
+    /// Sequential data with many instances, like Vec::len
+    Seq,
+    /// Average over samples
+    Avg, // or Norm?
+    /// Sub component of time
+    Time,
+    /// Don't display this histogram
+    Skip,
+}
+
+macro_rules! mk_Stats {
+    ($($(#[$meta: meta])* $field: ident $label: literal $display_type: ident,)*) => {
+
+        /// Metrics for a run of [perform_mcts]
+        #[derive(Debug)]
+        #[repr(C)]
+        pub struct Stats {
+            // SAFETY: this must only contain [Histogram]s
+            $(
+                $(#[$meta])*
+                pub $field: Histogram,
+            )*
+        }
+        impl Stats {
+            /// How many histograms
+            pub const COUNT: usize = size_of::<Stats>() / size_of::<Histogram>();
+            /// For displaying histograms
+            pub const LABELS: &[&str; Self::COUNT] = &[$($label,)*];
+            /// How each field ought to be displayed
+            pub const DISPLAY_TYPE: &[DisplayType; Self::COUNT] = &[$(DisplayType::$display_type,)*];
+            /// for Python serialization
+            pub const _FIELD_NAMES: &[&str; Self::COUNT] = &[$(stringify!($field),)*];
+            pub const fn new() -> Self {
+                Self {
+                    $($field: Histogram::new(),)*
+                }
+            }
+        }
+    };
+}
+
+mk_Stats!(
+    /// Hash of the input state string
+    state_hash "state_hash" Skip,
+
+    /// How many iterations of MCTS were performed
+    iter_count "num_iters" Avg,
+
+    /// Process memory usage immediately after mcts before. Zero if absent
+    phys_mem_usage "phys_mem_usage" Avg,
+    /// Process memory usage immediately after mcts. Zero if absent
+    virt_mem_usage "virt_mem_usage" Avg,
+
+    /// Duration of MCTS run in milliseconds
+    total_ms "time (ms)" Avg,
+    /// Time spent in selection stage
+    selection_ms "selection (ms)" Time,
+    /// Time spent in expand stage
+    expand_ms "expand (ms)" Time,
+    /// Time spent in rollout stage
+    rollout_ms "rollout (ms)" Time,
+    /// Time spent in backpropagate stage
+    backpropagate_ms "backpropagate (ms)" Time,
+
+    /// Final len of ChildMap
+    map_len "child_map.len" Avg,
+    /// Final capacity of ChildMap
+    map_cap "child_map.capacity" Avg,
+
+    /// Vec<Node> in ChildMap::V
+    node_len "child_map[k].len" Seq,
+    /// Vec<Node> in ChildMap::V
+    node_cap "child_map[k].cap" Seq,
+
+    /// Node.s[12]_options
+    move_node_len "node.options.len" Seq,
+    /// Node.s[12]_options
+    move_node_cap "node.options.cap" Seq,
+
+    /// How many times nodes appeared as a key in ChildMap
+    ///
+    /// In other words, how many of its options were explored
+    node_as_key "node.explored_options" Seq,
+    /// s1.len() * s2.len()
+    options_product "options.cartprod.len" Seq,
+
+    /// Node.instructions_list
+    instr_list_len "node.instrs.len" Seq,
+    /// Node.instructions_list
+    instr_list_cap "node.instrs.cap" Seq,
+
+    /// Depth of any nodes in ChildMap
+    node_depth "node.depth" Seq,
+    /// Depth of leaf nodes in ChildMap
+    leaf_node_depth "leaf_node.depth" Seq,
+
+    // TODO: am i misinterpreting this?
+
+    /// Node.instructions.percentage * 10
+    node_weight_pct "node.instrs.pct" Seq,
+);
+
+impl Stats {
+    // SAFETY: type only contains Histograms and is repr(C)
+    pub const fn as_array(&self) -> &[Histogram; Self::COUNT] {
+        unsafe { core::mem::transmute(self) }
+    }
+    pub fn as_array_mut(&mut self) -> &mut [Histogram] {
+        unsafe {
+            core::mem::transmute::<&mut Self, &mut [Histogram; Self::COUNT]>(self).as_mut_slice()
+        }
+    }
+
     pub fn analyze_time(&mut self, timers: Timers) {
         self.selection_ms.inc(timers.selection / 1_000_000);
         self.expand_ms.inc(timers.expand / 1_000_000);
         self.rollout_ms.inc(timers.rollout / 1_000_000);
         self.backpropagate_ms.inc(timers.backpropagate / 1_000_000);
     }
+
     pub fn analyze_tree(&mut self, child_map: &poke_engine::mcts::ChildMap) {
         self.map_len.inc(child_map.len() as u64);
         self.map_cap.inc(child_map.capacity() as u64);
@@ -89,123 +204,6 @@ impl HistList {
         }
         for count in tmp_node_num_children_hist.0.values() {
             self.node_as_key.inc(*count as u64);
-        }
-    }
-}
-
-/// How a histogram should be displayed
-#[derive(Copy, Clone, PartialEq, Eq)]
-pub enum DisplayType {
-    /// Sequential data with many instances, like Vec::len
-    Seq,
-    /// Average over samples
-    Avg, // or Norm?
-    /// Sub component of time
-    Time,
-    /// Don't display this histogram
-    Skip,
-}
-
-macro_rules! mk_HistList {
-    ($($(#[$meta: meta])* $field: ident $label: literal $display_type: ident,)*) => {
-
-        /// Metrics for a run of [perform_mcts]
-        #[derive(Debug)]
-        #[repr(C)]
-        pub struct HistList {
-            // SAFETY: this must only contain [Histogram]s
-            $(
-                $(#[$meta])*
-                pub $field: Histogram,
-            )*
-        }
-        impl HistList {
-            /// How many histograms
-            pub const COUNT: usize = size_of::<HistList>() / size_of::<Histogram>();
-            /// For displaying histograms
-            pub const LABELS: &[&str; Self::COUNT] = &[$($label,)*];
-            /// How each field ought to be displayed
-            pub const DISPLAY_TYPE: &[DisplayType; Self::COUNT] = &[$(DisplayType::$display_type,)*];
-            /// for Python serialization
-            pub const _FIELD_NAMES: &[&str; Self::COUNT] = &[$(stringify!($field),)*];
-            pub const fn new() -> Self {
-                Self {
-                    $($field: Histogram::new(),)*
-                }
-            }
-        }
-    };
-}
-
-mk_HistList!(
-    /// Hash of the input state string
-    state_hash "state_hash" Skip,
-
-    /// How many iterations of MCTS were performed
-    iter_count "num_iters" Avg,
-
-    /// Process memory usage immediately after mcts before. Zero if absent
-    phys_mem_usage "phys_mem_usage" Avg,
-    /// Process memory usage immediately after mcts. Zero if absent
-    virt_mem_usage "virt_mem_usage" Avg,
-
-    /// Duration of MCTS run in milliseconds
-    total_ms "time (ms)" Avg,
-    /// Time spent in selection stage
-    selection_ms "selection (ms)" Time,
-    /// Time spent in expand stage
-    expand_ms "expand (ms)" Time,
-    /// Time spent in rollout stage
-    rollout_ms "rollout (ms)" Time,
-    /// Time spent in backpropagate stage
-    backpropagate_ms "backpropagate (ms)" Time,
-
-    /// Final len of ChildMap
-    map_len "child_map.len" Avg,
-    /// Final capacity of ChildMap
-    map_cap "child_map.capacity" Avg,
-
-    /// Vec<Node> in ChildMap::V
-    node_len "child_map[k].len" Seq,
-    /// Vec<Node> in ChildMap::V
-    node_cap "child_map[k].cap" Seq,
-
-    /// Node.s[12]_options
-    move_node_len "node.options.len" Seq,
-    /// Node.s[12]_options
-    move_node_cap "node.options.cap" Seq,
-
-    /// How many times nodes appeared as a key in ChildMap
-    ///
-    /// In other words, how many of its options were explored
-    node_as_key "node.explored_options" Seq,
-    /// s1.len() * s2.len()
-    options_product "options.cartprod.len" Seq,
-
-    /// Node.instructions_list
-    instr_list_len "node.instrs.len" Seq,
-    /// Node.instructions_list
-    instr_list_cap "node.instrs.cap" Seq,
-
-    /// Depth of any nodes in ChildMap
-    node_depth "node.depth" Seq,
-    /// Depth of leaf nodes in ChildMap
-    leaf_node_depth "leaf_node.depth" Seq,
-
-    // TODO: am i misinterpreting this?
-
-    /// Node.instructions.percentage * 10
-    node_weight_pct "node.instrs.pct" Seq,
-);
-
-impl HistList {
-    // SAFETY: type only contains Histograms and is repr(C)
-    pub const fn as_array(&self) -> &[Histogram; Self::COUNT] {
-        unsafe { core::mem::transmute(self) }
-    }
-    pub fn as_array_mut(&mut self) -> &mut [Histogram] {
-        unsafe {
-            core::mem::transmute::<&mut Self, &mut [Histogram; Self::COUNT]>(self).as_mut_slice()
         }
     }
 }
