@@ -69,6 +69,8 @@ mk_Stats!(
     rollout_ms "rollout (ms)" Time,
     /// Time spent in backpropagate stage
     backpropagate_ms "backpropagate (ms)" Time,
+    /// Time spent idle
+    idle_ms "backpropagate (ms)" Time,
 
     /// Final len of ChildMap
     map_len "child_map.len" Avg,
@@ -124,6 +126,7 @@ impl Stats {
         self.expand_ms.inc(timers.expand / 1_000_000);
         self.rollout_ms.inc(timers.rollout / 1_000_000);
         self.backpropagate_ms.inc(timers.backpropagate / 1_000_000);
+        self.idle_ms.inc(timers.idle / 1_000_000);
     }
 
     pub fn analyze_tree(&mut self, child_map: &poke_engine::mcts::ChildMap) {

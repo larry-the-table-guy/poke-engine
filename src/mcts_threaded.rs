@@ -386,7 +386,7 @@ pub fn perform_mcts_shared_tree_inner(
     max_time: Duration,
     worker_count: usize,
 ) -> (MctsResult, Arc<Node>, Timers, ChildMap) {
-    let mut timers = vec![Timers::default(); worker_count];
+    let mut timers = vec![(Timers::default(), Instant::now()); worker_count];
     let root_eval = evaluate(state);
     let deadline = Instant::now() + max_time;
     let root = Node::new_root(side_one_options, side_two_options);
@@ -396,7 +396,7 @@ pub fn perform_mcts_shared_tree_inner(
     let children: Arc<ChildMap> = Arc::new(DashMap::with_capacity(1 << 16));
 
     thread::scope(|scope| {
-        for timer in timers.iter_mut() {
+        for (timer, end_instant) in timers.iter_mut() {
             let root = root.clone();
             let started_iterations = started_iterations.clone();
             let children = children.clone();
@@ -430,13 +430,18 @@ pub fn perform_mcts_shared_tree_inner(
                     );
                     iterations_until_deadline_check -= 1;
                 }
+                *end_instant = std::time::Instant::now();
             });
         }
     });
-    let timers = timers.into_iter().fold(Timers::default(), |mut acc, t| {
-        acc.add(&t);
-        acc
-    });
+    let join_instant = Instant::now();
+    let timers = timers
+        .into_iter()
+        .fold(Timers::default(), |mut acc, (t, end_instant)| {
+            acc.add(&t);
+            acc.idle += join_instant.duration_since(end_instant).as_nanos() as u64;
+            acc
+        });
 
     let options = root.options.get().expect("root options initialized");
     let result = MctsResult {

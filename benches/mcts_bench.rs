@@ -21,48 +21,37 @@ fn main() {
 
     let (command, args) = args.split_first().expect("need at least one arg for mode");
 
-    // parse --key=value flags
-    let mut stats_type = StatsType::Full;
-    let mut output_mode = ReportBackend::Markdown;
-    let mut max_time = Duration::from_secs(5);
-    let mut num_threads: Option<NonZeroU32> = None; // default to single threaded
-    for arg in args {
-        if let Some(s) = arg.strip_prefix("--stats=") {
-            stats_type = match s {
-                "full" => StatsType::Full,
-                "short" => StatsType::Short,
-                "none" => StatsType::None,
-                other => panic!("'{}' is not a valid arg for --stats=...", other),
-            };
-        } else if let Some(mode) = arg.strip_prefix("--output=") {
-            output_mode = match mode {
-                "binary" => {
-                    if std::io::stdout().is_terminal() {
-                        panic!("Hey! You asked for binary output, but stdout is a terminal. Redirect stdout.");
-                    }
-                    ReportBackend::Binary
-                }
-                "markdown" => ReportBackend::Markdown,
-                "python" => ReportBackend::Python,
-                other => {
-                    panic!("This program doesn't support '{}' as an output mode", other)
-                }
-            };
-        } else if let Some(seconds) = arg.strip_prefix("--time=") {
-            max_time = Duration::from_secs(seconds.parse().unwrap());
-        } else if let Some(count) = arg.strip_prefix("--threads=") {
-            let count = count.parse::<u32>().unwrap();
-            num_threads = NonZeroU32::new(count);
-        } else if arg.starts_with("--") {
-            panic!("unrecognized argument '{}'", arg)
-        } else {
-            // ignore, handled by each separate command
-        }
-    }
-
     match command.as_str() {
         "bench" => {
-            bench_mcts(num_threads, stats_type, output_mode, max_time);
+            // parse --key=value flags
+            let mut stats_type = StatsType::Full;
+            let mut max_time = Duration::from_secs(5);
+            let mut num_threads: Option<NonZeroU32> = None; // default to single threaded
+            for arg in args {
+                if let Some(s) = arg.strip_prefix("--stats=") {
+                    stats_type = match s {
+                        "full" => StatsType::Full,
+                        "short" => StatsType::Short,
+                        "none" => StatsType::None,
+                        other => panic!("'{}' is not a valid arg for --stats=...", other),
+                    };
+                } else if let Some(seconds) = arg.strip_prefix("--time=") {
+                    max_time = Duration::from_secs(seconds.parse().unwrap());
+                } else if let Some(count) = arg.strip_prefix("--threads=") {
+                    let count = count.parse::<u32>().unwrap();
+                    num_threads = NonZeroU32::new(count);
+                } else if arg.starts_with("--") {
+                    panic!("unrecognized argument '{}'", arg)
+                } else {
+                    // ignore, handled by each separate command
+                }
+            }
+            if std::io::stdout().is_terminal() {
+                panic!(
+                    "Hey! 'bench' produces binary output, but stdout is a terminal. Redirect stdout."
+                );
+            }
+            bench_mcts(num_threads, stats_type, max_time);
         }
         "diff" => {
             let files = args;
@@ -84,13 +73,16 @@ fn main() {
                 .collect::<Vec<_>>();
             diff(reports.as_slice());
         }
-        // TODO: remove, replace with diff
-        "print" => {
-            let mut stdin = std::io::stdin().lock();
-            let mut buf = Vec::with_capacity(0);
-            stdin.read_to_end(&mut buf).unwrap();
-            let (header, stats) = binary_deserialize(buf.as_slice());
-            output(output_mode, stats_type, &header, &stats);
+        "print-hashes" => {
+            let mut input = Vec::with_capacity(4096 * 2);
+            std::io::stdin().read_to_end(&mut input).unwrap();
+            let (_, b) = binary_deserialize(&input);
+            for (hash, count) in b.state_hash.iter() {
+                println!("{hash:16x} x {count}");
+            }
+        }
+        "print-python" => {
+            unimplemented!();
         }
         "merge" => {
             // take file paths from args, compare version numbers, spit out report
@@ -104,25 +96,13 @@ fn main() {
 }
 
 #[derive(Copy, Clone, PartialEq, Eq)]
-enum ReportBackend {
-    Markdown,
-    Binary,
-    Python,
-}
-
-#[derive(Copy, Clone, PartialEq, Eq)]
 enum StatsType {
     Full,
     Short,
     None,
 }
 
-fn bench_mcts(
-    num_threads: Option<NonZeroU32>,
-    stats_type: StatsType,
-    output_mode: ReportBackend,
-    max_time: Duration,
-) {
+fn bench_mcts(num_threads: Option<NonZeroU32>, stats_type: StatsType, max_time: Duration) {
     let mut stats = Stats::new();
     let mut at_least_one = false;
 
@@ -189,32 +169,7 @@ fn bench_mcts(
     };
     let header = BinHeader::new(num_threads, elem_sizes.clone());
 
-    output(output_mode, stats_type, &header, &stats);
-}
-
-fn output(output_mode: ReportBackend, stats_type: StatsType, header: &BinHeader, stats: &Stats) {
-    match (output_mode, stats_type) {
-        (_, StatsType::None) => return,
-        (ReportBackend::Markdown, stats_type) => {
-            pretty_print(stats_type, &header, &stats);
-        }
-        (ReportBackend::Binary, StatsType::Full) => {
-            binary_serialize(&header, &stats);
-        }
-        (ReportBackend::Binary | ReportBackend::Python, StatsType::Short) => {
-            // (Lowest priority use case)
-            // Just CSV of iter stats.
-            // I don't see a real need for a binary format for just iter stats.
-            unimplemented!();
-        }
-        (ReportBackend::Python, StatsType::Full) => {
-            // FIXME: refine to reduce need for cleanup
-
-            // dictionary on each line. Debug print gets close but has Type names. just want field names
-            println!("{:?}", header);
-            println!("{:?}", stats);
-        }
-    }
+    binary_serialize(&header, &stats);
 }
 
 fn hash_state_string(s: &str) -> u64 {
@@ -287,184 +242,6 @@ impl ElemSizes {
     };
 }
 
-// TODO: maybe extend diff and remove this
-// adding more props to diff isn't that hard, less total code.
-// just a question of presentation
-fn pretty_print(stats_type: StatsType, header: &BinHeader, stats: &Stats) {
-    println!("# Samples Summary\n");
-
-    if let Some(count) = header.num_threads {
-        println!("multi-threaded: {count}")
-    } else {
-        println!("single-threaded")
-    }
-
-    println!("\n<details><summary><h2>State Hashes</h2></summary>\n\n```");
-    for (state_hash, count) in stats.state_hash.iter() {
-        println!("{state_hash:16x} | {count}")
-    }
-    println!("```\n</details>\n");
-
-    // TODO: replace this with properties from diff
-    println!(
-        "| {:^11} | {:^12} | {:^13} | {:^13} | {:^13} |",
-        "# Iters", "Time (ms)", "Iters / sec", "Phys Mem MB", "Virt Mem MB"
-    );
-    println!(
-        "|{}:|{}:|{}:|{}:|{}:|",
-        "-".repeat(12),
-        "-".repeat(13),
-        "-".repeat(14),
-        "-".repeat(14),
-        "-".repeat(14),
-    );
-    println!(
-        "| {:11.0} | {:12.0} | {:13.0} | {:13.0} | {:13.0} |",
-        stats.iter_count.mean(),
-        stats.total_ms.mean(),
-        stats.iter_count.weighted_sum() as f64 / stats.total_ms.weighted_sum() as f64 * 1000.,
-        stats.phys_mem_usage.mean() / 1_000_000.,
-        stats.virt_mem_usage.mean() / 1_000_000.,
-    );
-
-    if stats_type != StatsType::Full {
-        return;
-    }
-    println!("\n");
-    println!("# Memory Breakdown\n");
-
-    let num_samples = stats.state_hash.unweighted_sum();
-    // Physical memory is more interesting, so we use as the total
-    if stats.phys_mem_usage.len() == 0 {
-        eprintln!("Process memory usage stats completely absent, omitting");
-    } else if stats.phys_mem_usage.unweighted_sum() != num_samples {
-        eprintln!("1 or more samples are missing process memory usage data, stats may be skewed");
-    }
-    let avg_proc_mb_used = stats.phys_mem_usage.mean() / 1_000_000.;
-    let avg_proc_mb_reserved = stats.virt_mem_usage.mean() / 1_000_000.;
-
-    let mem_table = [
-        (
-            "child_map::(K,V)",
-            header.elem_sizes.child_map_kv,
-            &stats.map_len,
-            &stats.map_cap,
-        ),
-        (
-            "Node",
-            header.elem_sizes.node,
-            &stats.node_len,
-            &stats.node_cap,
-        ),
-        (
-            "MoveNode",
-            header.elem_sizes.move_node,
-            &stats.move_node_len,
-            &stats.move_node_cap,
-        ),
-        (
-            "Instruction",
-            header.elem_sizes.instruction,
-            &stats.instr_list_len,
-            &stats.instr_list_cap,
-        ),
-    ];
-
-    println!(
-        "| {:^20} | {:^8} | {:^12} | {:^13} | {:^12} | {:^13} | {:^9} | {:^9} |",
-        "Object",
-        "Size",
-        "Num used",
-        "MB used",
-        "Num reserved",
-        "MB reserved",
-        "% Spare",
-        "% Total"
-    );
-    println!(
-        "|:{}|{}:|{}:|{}:|{}:|{}:|{}:|{}:|",
-        "-".repeat(21),
-        "-".repeat(9),
-        "-".repeat(13),
-        "-".repeat(14),
-        "-".repeat(13),
-        "-".repeat(14),
-        "-".repeat(10),
-        "-".repeat(10),
-    );
-
-    let (sum_mb_used, sum_mb_reserved) =
-        mem_table
-            .iter()
-            .fold((0, 0), |(uacc, racc), (_, size, used, reserved)| {
-                (
-                    uacc + used.weighted_sum() * *size as u64,
-                    racc + reserved.weighted_sum() * *size as u64,
-                )
-            });
-    let sum_mb_used = sum_mb_used as f64 / 1_000_000. / num_samples as f64;
-    let sum_mb_reserved = sum_mb_reserved as f64 / 1_000_000. / num_samples as f64;
-    let avg_mb_used = avg_proc_mb_used.max(sum_mb_used);
-    let avg_mb_reserved = avg_proc_mb_reserved.max(sum_mb_reserved);
-    let pct_total_spare = 100. * (avg_mb_reserved - avg_mb_used) / avg_mb_reserved;
-
-    for (name, size, used, reserved) in mem_table {
-        let used = used.weighted_sum() / num_samples;
-        let reserved = reserved.weighted_sum() / num_samples;
-        assert!(
-            used <= reserved,
-            "faulty data, capacity shouldn't be less than len"
-        );
-        let used_mb = (used * size as u64) as f64 / 1_000_000f64;
-        let reserved_mb = (reserved * size as u64) as f64 / 1_000_000f64;
-        let pct_spare = (1f64 - used as f64 / reserved as f64) * 100f64;
-        let pct_total = 100f64 * reserved_mb as f64 / avg_mb_reserved as f64;
-        println!(
-            "| {name:20} | {size:8} | {used:12} | {used_mb:13.2} | {reserved:12} | {reserved_mb:13.2} | {pct_spare:9.2} | {pct_total:9.2} |"
-        );
-    }
-    println!("||");
-    println!(
-        "| {:20} | {:8} | {:12} | {:13.2} | {:12} | {:13.2} | {:9.2} | {:9.2} |",
-        "Subtotals",
-        "",
-        "",
-        sum_mb_used,
-        "",
-        sum_mb_reserved,
-        100. * (sum_mb_reserved - sum_mb_used) / sum_mb_reserved,
-        100. * sum_mb_reserved / avg_mb_used
-    );
-    // sum_mb_reserved maps more closely to phys mem than virt mem, so makes more sense to use that
-    // as the total
-
-    let unacc_mb_used = avg_mb_used - sum_mb_reserved;
-    println!(
-        "| {:20} | {:8} | {:12} | {:13.2} | {:12} | {:13.2} | {:9.2} | {:9.2} |",
-        "Unaccounted",
-        "",
-        "",
-        unacc_mb_used,
-        "",
-        "",
-        "",
-        100f64 * unacc_mb_used / avg_mb_used
-    );
-    println!("||");
-    println!(
-        "| {:20} | {:8} | {:12} | {:13.2} | {:12} | {:13.2} | {:9.2} | {:9} |",
-        "Grand Total", "", "", avg_mb_used, "", avg_mb_reserved, pct_total_spare, 100f64
-    );
-
-    // println!("\n");
-    // println!("# Time Breakdown\n");
-
-    println!("\n\n<details><summary><h1>Histograms</h1></summary>\n");
-
-    render_hists(&[("", &header, &stats)]);
-    println!("\n</details>");
-}
-
 type Report<'a> = (&'a str, &'a BinHeader, &'a Stats);
 
 fn diff(reports: &[Report]) {
@@ -496,7 +273,7 @@ fn diff(reports: &[Report]) {
 
     println!("<details><summary><h1>Summary</h1></summary>\n");
 
-    print!("| {:^25} | {:^14} |", "Property", "Baseline",);
+    print!("| {:^29} | {:^14} |", "Property", "Baseline",);
     for other in others {
         print!(
             " {:^14.14} | {:^14} | {:^8} |",
@@ -504,7 +281,7 @@ fn diff(reports: &[Report]) {
         );
     }
     println!();
-    print!("|:{}|{}:|", "-".repeat(26), "-".repeat(15));
+    print!("|:{}|{}:|", "-".repeat(30), "-".repeat(15));
     for _ in others {
         print!(
             "{}:|{}:|{}:|",
@@ -515,68 +292,98 @@ fn diff(reports: &[Report]) {
     }
     println!();
 
-    // TODO: replace pretty-print with this
-    // types of histograms
     // TODO: add some line breaks, hard to read as it gets longer
-    // T0: low-to-high: prefix sum etc
-    // T1: subcomponents: show pct total
-    // T2: others normalized by iter|sample|thread
-    // T3: some may want standard deviation or other
+    // a few categories of histograms, potential for code reuse
 
     // TODO: maybe a tag on each property so they can be filtered by diff flags
-    fn prop_fn(r: &Report) -> [(&'static str, f64); 22] {
+    fn prop_fn(r: &Report) -> [(&'static str, f64); 36] {
+        const MEGA: f64 = 1_000_000.;
         let bh = &r.1;
         let es = &bh.elem_sizes;
         let stats = &r.2;
         let total_iters = stats.iter_count.weighted_sum();
-        let total_bytes_used = es.node as u64 * stats.node_len.weighted_sum()
-            + es.move_node as u64 * stats.move_node_len.weighted_sum()
-            + es.instruction as u64 * stats.instr_list_len.weighted_sum()
-            + es.child_map_kv as u64 * stats.map_len.weighted_sum();
-        let total_bytes_reserved = es.node as u64 * stats.node_cap.weighted_sum()
-            + es.move_node as u64 * stats.move_node_cap.weighted_sum()
-            + es.instruction as u64 * stats.instr_list_cap.weighted_sum()
-            + es.child_map_kv as u64 * stats.map_cap.weighted_sum();
+        let n_threads = r.1.num_threads.map(NonZeroU32::get).unwrap_or(1);
+
+        let tot_used_nodes = stats.node_len.weighted_sum();
+        let tot_used_movenodes = stats.move_node_len.weighted_sum();
+        let tot_used_instrs = stats.instr_list_len.weighted_sum();
+        let tot_used_map = stats.map_len.weighted_sum();
+
+        let tot_reserved_nodes = stats.node_cap.weighted_sum();
+        let tot_reserved_movenodes = stats.move_node_cap.weighted_sum();
+        let tot_reserved_instrs = stats.instr_list_cap.weighted_sum();
+        let tot_reserved_map = stats.map_cap.weighted_sum();
+        let tot_res_nodes_b = es.node as u64 * tot_reserved_nodes;
+        let tot_res_movenodes_b = es.move_node as u64 * tot_reserved_movenodes;
+        let tot_res_instrs_b = es.instruction as u64 * tot_reserved_instrs;
+        let tot_res_map_b = es.child_map_kv as u64 * tot_reserved_map;
+        let total_bytes_reserved =
+            tot_res_nodes_b + tot_res_movenodes_b + tot_res_instrs_b + tot_res_map_b;
+
         let total_time_ms = stats.total_ms.weighted_sum() as f64;
-        let pct_spare_bytes =
-            100f64 * (1f64 - total_bytes_used as f64 / total_bytes_reserved as f64);
+        let total_thread_time_ms = total_time_ms * n_threads as f64;
+        let proc_phys = stats.phys_mem_usage.weighted_sum() as f64;
+        let pct_unaccounted = 100. * (proc_phys - total_bytes_reserved as f64) / proc_phys;
         let num_samples = stats.state_hash.unweighted_sum();
         let num_samplesf = num_samples as f64;
         let total_itersf = total_iters as f64;
         let num_nodes = stats.node_len.weighted_sum();
-        let n_threads = r.1.num_threads.map(NonZeroU32::get).unwrap_or(1);
         // total subtimes across samples, in seconds
         let tot_selection = stats.selection_ms.weighted_sum() as f64;
         let tot_expand = stats.expand_ms.weighted_sum() as f64;
         let tot_rollout = stats.rollout_ms.weighted_sum() as f64;
         let tot_backpropagate = stats.backpropagate_ms.weighted_sum() as f64;
+        let tot_idle = stats.idle_ms.weighted_sum() as f64;
         let tot_unaccounted_time = total_time_ms
-            - (tot_selection + tot_expand + tot_rollout + tot_backpropagate) / n_threads as f64;
+            - (tot_selection + tot_expand + tot_rollout + tot_backpropagate + tot_idle)
+                / n_threads as f64;
         // TODO: moar properties
         #[rustfmt::skip]
         let a = [
             ("Threads", bh.num_threads.map(NonZeroU32::get).unwrap_or_default() as f64),
-            ("size(ChildMapKV)", es.child_map_kv as f64),
-            ("size(Node)", es.node as f64),
-            ("size(MoveNode)", es.move_node as f64),
-            ("size(Instruction)", es.instruction as f64),
-            ("avg # nodes / sample", num_nodes as f64 / num_samplesf),
-            ("avg ChildMap.len / sample", stats.map_len.weighted_sum() as f64 / num_samplesf),
-            ("avg ChildMap.cap / sample", stats.map_cap.weighted_sum() as f64 / num_samplesf),
-            ("avg MB used / sample", total_bytes_used as f64 / 1_000_000. / num_samplesf),
-            ("avg MB reserved / sample", total_bytes_reserved as f64 / 1_000_000. / num_samplesf),
-            ("avg B used / iter", total_bytes_used as f64 / total_itersf),
-            ("avg B reserved / iter", total_bytes_reserved as f64 / total_itersf),
-            ("% spare bytes", pct_spare_bytes),
-            ("avg iters / sample", total_itersf / num_samplesf),
-            ("avg time (ms) / sample", total_time_ms / num_samplesf),
-            ("avg iters / sec", total_itersf * 1000. / total_time_ms),
-            ("avg iters / sec / thread", total_itersf * 1000. / total_time_ms / n_threads as f64),
-            ("% time in selection", 100. * tot_selection / total_time_ms),
-            ("% time in expand", 100. * tot_expand / total_time_ms),
-            ("% time in rollout", 100. * tot_rollout / total_time_ms),
-            ("% time in backpropagate", 100. * tot_backpropagate / total_time_ms),
-            ("% time unaccounted", 100. * tot_unaccounted_time / total_time_ms),
+
+            ("size(`ChildMap::KV`)", es.child_map_kv as f64),
+            ("size(`Node`)", es.node as f64),
+            ("size(`MoveNode`)", es.move_node as f64),
+            ("size(`Instruction`)", es.instruction as f64),
+
+            ("used `Node`s / sample", tot_used_nodes as f64 / num_samplesf),
+            ("reserved `Node`s / sample", tot_reserved_nodes as f64 / num_samplesf),
+            ("% used `Node`s", 100. * tot_used_nodes as f64 / tot_reserved_nodes as f64),
+            ("`Node` MB / sample", tot_res_nodes_b as f64 / MEGA / num_samplesf),
+
+            ("used `MoveNode`s / sample", tot_used_movenodes as f64 / num_samplesf),
+            ("reserved `MoveNode`s / sample", tot_reserved_movenodes as f64 / num_samplesf),
+            ("% used `MoveNode`s", 100.*tot_used_movenodes as f64 / tot_reserved_movenodes as f64),
+            ("`MoveNode` MB / sample", tot_res_movenodes_b as f64 / MEGA / num_samplesf),
+
+            ("used `Instr`s / sample", tot_used_instrs as f64 / num_samplesf),
+            ("reserved `Instr`s / sample", tot_reserved_instrs as f64 / num_samplesf),
+            ("% used `Instruction`s", 100. * tot_used_instrs as f64 / tot_reserved_instrs as f64),
+            ("`Instruction` MB / sample", tot_res_instrs_b as f64 / MEGA / num_samplesf),
+
+            ("`ChildMap.len` / sample", tot_used_map as f64 / num_samplesf),
+            ("`ChildMap.cap` / sample", tot_reserved_map as f64 / num_samplesf),
+            ("`ChildMap` MB / sample", tot_res_map_b as f64 / MEGA / num_samplesf),
+
+            ("MB reserved / sample", total_bytes_reserved as f64 / MEGA / num_samplesf),
+            ("B reserved / iter", total_bytes_reserved as f64 / total_itersf),
+            ("`Node`s / iter", num_nodes as f64 / total_itersf),
+            ("% unaccounted mem", pct_unaccounted),
+            ("proc phys MB / sample", proc_phys / MEGA / num_samplesf),
+            ("proc virt MB / sample", stats.virt_mem_usage.mean() / MEGA),
+
+            ("iters / sample", total_itersf / num_samplesf),
+            ("iters / sec", total_itersf * 1000. / total_time_ms),
+            ("iters / sec / thread", total_itersf * 1000. / total_thread_time_ms),
+
+            ("% time in `selection`", 100. * tot_selection / total_thread_time_ms),
+            ("% time in `expand`", 100. * tot_expand / total_thread_time_ms),
+            ("% time in `rollout`", 100. * tot_rollout / total_thread_time_ms),
+            ("% time in `backpropagate`", 100. * tot_backpropagate / total_thread_time_ms),
+            ("% time idle", 100. * tot_idle / total_thread_time_ms),
+            ("% time unaccounted", 100. * tot_unaccounted_time / total_thread_time_ms),
+            ("time (ms) / sample", total_time_ms / num_samplesf),
         ];
         a
     }
@@ -586,7 +393,7 @@ fn diff(reports: &[Report]) {
         .map(|v| prop_fn(v).map(|t| t.1))
         .collect::<Vec<_>>();
     for (prop_idx, (name, baseline_v)) in baseline_props.iter().enumerate() {
-        print!("| {:25} | {:14.2} |", name, baseline_v,);
+        print!("| {:29} | {:14.2} |", name, baseline_v,);
         for o_v in other_props.iter() {
             let o_v = o_v[prop_idx];
             let change = o_v - baseline_v;
@@ -620,7 +427,7 @@ fn render_hists(reports: &[Report]) {
         print!("|    Key    |");
         for idx in 0..reports.len() {
             print!(
-                " {:^8} | % Total | %PSum/T | %C/SSum |",
+                " {:^8} | % Total | %PSum/T | %V/SSum |",
                 if reports.len() == 1 {
                     "Count".to_owned()
                 } else {

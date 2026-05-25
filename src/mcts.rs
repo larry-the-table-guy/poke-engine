@@ -276,6 +276,8 @@ pub struct Timers {
     pub expand: u64,
     pub rollout: u64,
     pub backpropagate: u64,
+    /// For multithreading; Time spent waiting on other threads.
+    pub idle: u64,
 }
 impl Timers {
     pub fn add(&mut self, other: &Timers) {
