@@ -189,13 +189,13 @@ impl Stats {
             let v = &v.nodes;
             tmp_node_num_children_hist.inc(k.0 as u64);
             self.node_len.inc(v.len() as u64);
-            self.node_cap.inc(v.capacity() as u64);
-            for node in v {
+            self.node_cap.inc(v.len() as u64);
+            for node in v.iter() {
                 if let Some(options) = node.options.get() {
                     self.move_node_len.inc(options.s1.len() as u64);
-                    self.move_node_cap.inc(options.s1.capacity() as u64);
+                    self.move_node_cap.inc(options.s1.len() as u64);
                     self.move_node_len.inc(options.s2.len() as u64);
-                    self.move_node_cap.inc(options.s2.capacity() as u64);
+                    self.move_node_cap.inc(options.s2.len() as u64);
                     self.options_product
                         .inc(options.s1.len() as u64 * options.s2.len() as u64);
                 }
