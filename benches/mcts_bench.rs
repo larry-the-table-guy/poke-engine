@@ -175,6 +175,10 @@ struct BinHeader {
 }
 impl BinHeader {
     pub const CURRENT_VERSION: u32 = 0;
+    /// First bytes in binary report, helpful if someone opens in text editor
+    ///
+    /// Part of the serialization format, doubles as magic bytes.
+    pub const PREFIX_STRING: &str = "Binary benchmark report for poke-engine\n";
     pub fn new(num_threads: Option<NonZeroU32>, elem_sizes: ElemSizes) -> Self {
         let gen = cfg_select! {
             feature = "gen9" => 9,
@@ -468,6 +472,7 @@ fn render_hists(reports: &[Report]) {
 
 fn binary_serialize(header: &BinHeader, stats: &Stats) {
     let mut scratch_buf = Vec::<u8>::with_capacity(4096 * 4);
+    scratch_buf.extend_from_slice(BinHeader::PREFIX_STRING.as_bytes());
 
     scratch_buf.extend_from_slice(unsafe {
         core::slice::from_raw_parts(
@@ -484,9 +489,12 @@ fn binary_serialize(header: &BinHeader, stats: &Stats) {
     stdout().flush().unwrap();
 }
 
-// TODO: replace panic with Result, I guess
+// TODO: replace panics with Result, I guess
 fn binary_deserialize(data: &[u8]) -> (BinHeader, Stats) {
-    let (header, rest) = data.split_at(size_of::<BinHeader>());
+    let rest = data
+        .strip_prefix(BinHeader::PREFIX_STRING.as_bytes())
+        .expect("Input lacks report prefix");
+    let (header, rest) = rest.split_at(size_of::<BinHeader>());
     let mut header = unsafe { header.as_ptr().cast::<BinHeader>().read_unaligned() };
     let recorded_header_checksum = header.header_checksum;
     let actual_header_checksum = header.update_checksum();
