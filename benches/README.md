@@ -1,6 +1,11 @@
+# Versioning
+The reports are designed to be comparable across generations, thread counts, and even as the implementation details of MCTS change.
+
+If the binary serialization of a report changes, the version number in the header must change. The other functionality, including `diff` or serializing to Python is free to change.
+
 # Usage 
 
-List of commands to produce performance metrics
+Assorted commands to produce performance metrics
 
 ## Type sizes
 
@@ -44,14 +49,14 @@ Quick reminder on ways to pass files via stdin in shell/bash:
 `find ./dir ...flags... -exec cat {} + | command args args`
 ```
 
-## Bench for fixed time
+### Bench for fixed time
 (default 5 seconds)
 ```sh
 # defaults to single threaded, can pass `--threads=n`
 cat ./benches/states/gen9.t0.example.txt | cargo bench --bench mcts_bench --features gen9 -- bench --time=5 > report.bin
 ```
 
-## Bench "fixed" amount of iterations w/ `perf stat`
+### Bench "fixed" amount of iterations w/ `perf stat`
 ```sh
 # uses a high time limit so that we hit the iteration cap.
 # skip stats to avoid adding noise. (probably minor but better not to)
@@ -60,13 +65,13 @@ cat ./benches/states/gen9.t0.example.txt | cargo bench --bench mcts_bench --feat
 perf stat -- ./target/release/deps/mcts_bench-SOME_HASH bench --skip-stats --time=100 --threads=0 < ./benches/states/example.txt
 ```
 
-## Display one or more binary reports
+### Display one or more binary reports
 ```sh
 cargo bench --bench mcts_bench --features gen9 -- diff ./report1 ./report2
 ```
 
-### Print state hashes
-In case you forget which states were in a used.
+#### Print state hashes
+In case you forgot which states were used in a report.
 ```sh
 # input via stdin, outputs to stdout
 cargo bench --bench mcts_bench --features gen9 -- print-hashes < ./report
