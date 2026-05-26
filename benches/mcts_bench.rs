@@ -24,21 +24,16 @@ fn main() {
     match command.as_str() {
         "bench" => {
             // parse --key=value flags
-            let mut stats_type = StatsType::Full;
+            let mut skip_stats = false;
             let mut max_time = Duration::from_secs(5);
             let mut num_threads: Option<NonZeroU32> = None; // default to single threaded
             for arg in args {
-                if let Some(s) = arg.strip_prefix("--stats=") {
-                    stats_type = match s {
-                        "full" => StatsType::Full,
-                        "short" => StatsType::Short,
-                        "none" => StatsType::None,
-                        other => panic!("'{}' is not a valid arg for --stats=...", other),
-                    };
+                if arg == "--skip-stats" {
+                    skip_stats = true;
                 } else if let Some(seconds) = arg.strip_prefix("--time=") {
                     max_time = Duration::from_secs(seconds.parse().unwrap());
                 } else if let Some(count) = arg.strip_prefix("--threads=") {
-                    let count = count.parse::<u32>().unwrap();
+                    let count = count.parse::<u32>().expect("valid u32 thread count");
                     num_threads = NonZeroU32::new(count);
                 } else if arg.starts_with("--") {
                     panic!("unrecognized argument '{}'", arg)
@@ -46,12 +41,12 @@ fn main() {
                     // ignore, handled by each separate command
                 }
             }
-            if std::io::stdout().is_terminal() {
+            if !skip_stats && std::io::stdout().is_terminal() {
                 panic!(
                     "Hey! 'bench' produces binary output, but stdout is a terminal. Redirect stdout."
                 );
             }
-            bench_mcts(num_threads, stats_type, max_time);
+            bench_mcts(num_threads, max_time, skip_stats);
         }
         "diff" => {
             let files = args;
@@ -85,32 +80,22 @@ fn main() {
             unimplemented!();
         }
         "merge" => {
-            // take file paths from args, compare version numbers, spit out report
+            // take file paths from args, compare version numbers, combine hists
             todo!("");
         }
-        s if s.starts_with("--") => {
-            panic!("missing mode argument");
-        }
+        s if s.starts_with("--") => panic!("missing mode argument"),
         s => panic!("unrecognized mode '{}'", s),
     }
 }
 
-#[derive(Copy, Clone, PartialEq, Eq)]
-enum StatsType {
-    Full,
-    Short,
-    None,
-}
-
-fn bench_mcts(num_threads: Option<NonZeroU32>, stats_type: StatsType, max_time: Duration) {
+fn bench_mcts(num_threads: Option<NonZeroU32>, max_time: Duration, skip_stats: bool) {
     let mut stats = Stats::new();
     let mut at_least_one = false;
 
     for line in std::io::stdin()
         .lines()
         .map(|r| r.unwrap())
-        .filter(|l| !l.is_empty())
-        .filter(|l| !l.starts_with('#'))
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
     {
         at_least_one = true;
         let hash = hash_state_string(&line);
@@ -127,22 +112,18 @@ fn bench_mcts(num_threads: Option<NonZeroU32>, stats_type: StatsType, max_time: 
                 max_time,
                 num_threads.get() as usize,
             );
-            if stats_type != StatsType::None {
-                proc_mem_usage = memory_stats::memory_stats();
-            }
             let time_ms = start.elapsed().as_millis() as u64;
-            if stats_type == StatsType::Full {
+            if !skip_stats {
+                proc_mem_usage = memory_stats::memory_stats();
                 stats.analyze_threaded_tree(&childmap);
             }
             (r.iteration_count, time_ms, timers)
         } else {
             let (r, _root, timers, childmap) =
                 mcts::perform_mcts_inner(&mut state, s1_options, s2_options, max_time);
-            if stats_type != StatsType::None {
-                proc_mem_usage = memory_stats::memory_stats();
-            }
             let time_ms = start.elapsed().as_millis() as u64;
-            if stats_type == StatsType::Full {
+            if !skip_stats {
+                proc_mem_usage = memory_stats::memory_stats();
                 stats.analyze_tree(&childmap);
             }
             (r.iteration_count, time_ms, timers)
@@ -158,8 +139,7 @@ fn bench_mcts(num_threads: Option<NonZeroU32>, stats_type: StatsType, max_time: 
         stats.analyze_time(sub_timers);
     }
 
-    if !at_least_one {
-        // no samples, just exit w/out any output
+    if !at_least_one || skip_stats {
         return;
     }
     let elem_sizes = if num_threads.is_none() {
@@ -354,7 +334,7 @@ fn diff(reports: &[Report]) {
 
             ("used `MoveNode`s / sample", tot_used_movenodes as f64 / num_samplesf),
             ("reserved `MoveNode`s / sample", tot_reserved_movenodes as f64 / num_samplesf),
-            ("% used `MoveNode`s", 100.*tot_used_movenodes as f64 / tot_reserved_movenodes as f64),
+            ("% used `MoveNode`s", 100. * tot_used_movenodes as f64 / tot_reserved_movenodes as f64),
             ("`MoveNode` MB / sample", tot_res_movenodes_b as f64 / MEGA / num_samplesf),
 
             ("used `Instr`s / sample", tot_used_instrs as f64 / num_samplesf),
