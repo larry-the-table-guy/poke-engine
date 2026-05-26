@@ -174,7 +174,7 @@ struct BinHeader {
     elem_sizes: ElemSizes,
 }
 impl BinHeader {
-    pub const CURRENT_VERSION: u32 = 0;
+    pub const CURRENT_VERSION: u32 = 1;
     /// First bytes in binary report, helpful if someone opens in text editor
     ///
     /// Part of the serialization format, doubles as magic bytes.
@@ -335,7 +335,6 @@ fn diff(reports: &[Report]) {
         let tot_unaccounted_time = total_time_ms
             - (tot_selection + tot_expand + tot_rollout + tot_backpropagate + tot_idle)
                 / n_threads as f64;
-        // TODO: moar properties
         #[rustfmt::skip]
         let a = [
             ("Gen", bh.gen as f64),
@@ -373,7 +372,7 @@ fn diff(reports: &[Report]) {
             ("proc virt MB / sample", stats.virt_mem_usage.mean() / MEGA),
 
             ("`Node`s / iter", num_nodes as f64 / total_itersf),
-            ("% explored `MoveNode`s", 100. * tot_used_map as f64 / tot_used_movenodes as f64),
+            ("% explored options", 100. * stats.node_as_key.weighted_sum() as f64 / stats.options_product.weighted_sum() as f64),
             ("iters / sample", total_itersf / num_samplesf),
             ("iters / sec", total_itersf * 1000. / total_time_ms),
             ("iters / sec / thread", total_itersf * 1000. / total_thread_time_ms),
