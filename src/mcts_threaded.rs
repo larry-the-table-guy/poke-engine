@@ -264,8 +264,9 @@ impl Node {
         let mut total_weight = 0.0f32;
         let nodes = instructions
             .into_iter()
-            .map(|instr| {
+            .map(|mut instr| {
                 total_weight += instr.percentage.max(0.0);
+                instr.instruction_list.shrink_to_fit();
                 Node::new_child(instr, self.depth.saturating_add(1))
             })
             .collect::<Arc<[Node]>>();

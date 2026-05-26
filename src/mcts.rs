@@ -139,9 +139,10 @@ impl Node {
             generate_instructions_from_move_pair(state, s1_move, s2_move, should_branch_on_damage);
         let mut this_pair_slice = new_instructions
             .into_iter()
-            .map(|state_instructions| {
+            .map(|mut state_instructions| {
                 let mut new_node = Node::new();
                 new_node.parent = self;
+                state_instructions.instruction_list.shrink_to_fit();
                 new_node.instructions = state_instructions;
                 new_node.s1_choice = s1_move_index as u8;
                 new_node.s2_choice = s2_move_index as u8;
