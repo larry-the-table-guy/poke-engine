@@ -232,9 +232,8 @@ impl ElemSizes {
     pub const CURRENT_THREADED: Self = Self {
         child_map_kv: size_of::<(mcts_threaded::ChildMapK, mcts_threaded::ChildMapV)>() as u32,
         // See [poke_engine::mcts_threaded::SharedBranch]
-        // Arc in backing Vec, ArcInner -> 2 usizes
-        node: (size_of::<std::sync::Arc<mcts_threaded::Node>>()
-            + size_of::<(usize, usize, mcts_threaded::Node)>()) as u32,
+        // ArcInner -> 2 usizes
+        node: (size_of::<(usize, usize)>() + size_of::<mcts_threaded::Node>()) as u32,
         move_node: size_of::<mcts_threaded::MoveNode>() as u32,
         instruction: size_of::<instruction::Instruction>() as u32,
     };

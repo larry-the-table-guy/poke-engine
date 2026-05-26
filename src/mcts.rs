@@ -15,7 +15,7 @@ fn sigmoid(x: f32) -> f32 {
 }
 
 pub type ChildMapK = (usize, usize, usize);
-pub type ChildMapV = Vec<Node>;
+pub type ChildMapV = Box<[Node]>;
 pub type ChildMap = HashMap<ChildMapK, ChildMapV>;
 
 #[derive(Debug)]
@@ -31,8 +31,8 @@ pub struct Node {
 
     // represents the total score and number of visits for this node
     // de-coupled for s1 and s2
-    pub s1_options: Option<Vec<MoveNode>>,
-    pub s2_options: Option<Vec<MoveNode>>,
+    pub s1_options: Option<Box<[MoveNode]>>,
+    pub s2_options: Option<Box<[MoveNode]>>,
 }
 
 impl Node {
@@ -49,18 +49,18 @@ impl Node {
         }
     }
     unsafe fn populate(&mut self, s1_options: Vec<MoveChoice>, s2_options: Vec<MoveChoice>) {
-        let s1_options_vec: Vec<MoveNode> = s1_options
-            .iter()
+        let s1_options_vec: Box<[MoveNode]> = s1_options
+            .into_iter()
             .map(|x| MoveNode {
-                move_choice: x.clone(),
+                move_choice: x,
                 total_score: 0.0,
                 visits: 0,
             })
             .collect();
-        let s2_options_vec: Vec<MoveNode> = s2_options
-            .iter()
+        let s2_options_vec: Box<[MoveNode]> = s2_options
+            .into_iter()
             .map(|x| MoveNode {
-                move_choice: x.clone(),
+                move_choice: x,
                 total_score: 0.0,
                 visits: 0,
             })
@@ -97,9 +97,9 @@ impl Node {
         let s2_mc_index = self.maximize_ucb_for_side(self.s2_options.as_ref().unwrap());
         let key = (self as *mut Node as usize, s1_mc_index, s2_mc_index);
         match children.get_mut(&key) {
-            Some(child_vector) => {
-                let child_vec_ptr = child_vector as *mut Vec<Node>;
-                let chosen_child = self.sample_node(child_vec_ptr);
+            Some(child_slice) => {
+                let child_slice_ptr = child_slice as *mut Box<[Node]>;
+                let chosen_child = self.sample_node(child_slice_ptr);
                 state.apply_instructions(&(*chosen_child).instructions.instruction_list);
                 (*chosen_child).selection(state, children)
             }
@@ -107,7 +107,7 @@ impl Node {
         }
     }
 
-    unsafe fn sample_node(&self, move_vector: *mut Vec<Node>) -> *mut Node {
+    unsafe fn sample_node(&self, move_vector: *mut Box<[Node]>) -> *mut Node {
         let mut rng = rng();
         let weights: Vec<f64> = (*move_vector)
             .iter()
@@ -135,25 +135,28 @@ impl Node {
             return self as *mut Node;
         }
         let should_branch_on_damage = self.root || (*self.parent).root;
-        let mut new_instructions =
+        let new_instructions =
             generate_instructions_from_move_pair(state, s1_move, s2_move, should_branch_on_damage);
-        let mut this_pair_vec = Vec::with_capacity(new_instructions.len());
-        for state_instructions in new_instructions.drain(..) {
-            let mut new_node = Node::new();
-            new_node.parent = self;
-            new_node.instructions = state_instructions;
-            new_node.s1_choice = s1_move_index as u8;
-            new_node.s2_choice = s2_move_index as u8;
-            this_pair_vec.push(new_node);
-        }
+        let mut this_pair_slice = new_instructions
+            .into_iter()
+            .map(|mut state_instructions| {
+                let mut new_node = Node::new();
+                new_node.parent = self;
+                state_instructions.instruction_list.shrink_to_fit();
+                new_node.instructions = state_instructions;
+                new_node.s1_choice = s1_move_index as u8;
+                new_node.s2_choice = s2_move_index as u8;
+                new_node
+            })
+            .collect::<Box<[Node]>>();
 
         // sample a node from the new instruction list.
         // this is the node that the rollout will be done on
-        let new_node_ptr = self.sample_node(&mut this_pair_vec);
+        let new_node_ptr = self.sample_node(&mut this_pair_slice);
         state.apply_instructions(&(*new_node_ptr).instructions.instruction_list);
 
         let key = (self as *mut Node as usize, s1_move_index, s2_move_index);
-        children.insert(key, this_pair_vec);
+        children.insert(key, this_pair_slice);
         new_node_ptr
     }
 
