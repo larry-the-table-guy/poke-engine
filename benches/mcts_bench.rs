@@ -162,6 +162,8 @@ fn hash_state_string(s: &str) -> u64 {
 struct BinHeader {
     /// Tracks binary repr. Print and Diff formats are free to change.
     version: u32,
+    /// Which generation was used.
+    gen: u32,
     /// For detecting header repr changes. Set to zero when calculating.
     ///
     /// More foolproof than version, but less descriptive for debugging.
@@ -174,8 +176,20 @@ struct BinHeader {
 impl BinHeader {
     pub const CURRENT_VERSION: u32 = 0;
     pub fn new(num_threads: Option<NonZeroU32>, elem_sizes: ElemSizes) -> Self {
+        let gen = cfg_select! {
+            feature = "gen9" => 9,
+            feature = "gen8" => 8,
+            feature = "gen7" => 7,
+            feature = "gen6" => 6,
+            feature = "gen5" => 5,
+            feature = "gen4" => 4,
+            feature = "gen3" => 3,
+            feature = "gen2" => 2,
+            feature = "gen1" => 1,
+        };
         let mut header = Self {
             version: BinHeader::CURRENT_VERSION,
+            gen,
             header_checksum: 0,
             num_threads,
             elem_sizes,
@@ -276,7 +290,7 @@ fn diff(reports: &[Report]) {
     // a few categories of histograms, potential for code reuse
 
     // TODO: maybe a tag on each property so they can be filtered by diff flags
-    fn prop_fn(r: &Report) -> [(&'static str, f64); 38] {
+    fn prop_fn(r: &Report) -> [(&'static str, f64); 39] {
         const MEGA: f64 = 1_000_000.;
         let bh = &r.1;
         let es = &bh.elem_sizes;
@@ -320,6 +334,7 @@ fn diff(reports: &[Report]) {
         // TODO: moar properties
         #[rustfmt::skip]
         let a = [
+            ("Gen", bh.gen as f64),
             ("Threads", bh.num_threads.map(NonZeroU32::get).unwrap_or_default() as f64),
 
             ("size(`ChildMap::KV`)", es.child_map_kv as f64),
