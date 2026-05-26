@@ -276,7 +276,7 @@ fn diff(reports: &[Report]) {
     // a few categories of histograms, potential for code reuse
 
     // TODO: maybe a tag on each property so they can be filtered by diff flags
-    fn prop_fn(r: &Report) -> [(&'static str, f64); 36] {
+    fn prop_fn(r: &Report) -> [(&'static str, f64); 38] {
         const MEGA: f64 = 1_000_000.;
         let bh = &r.1;
         let es = &bh.elem_sizes;
@@ -344,15 +344,17 @@ fn diff(reports: &[Report]) {
 
             ("`ChildMap.len` / sample", tot_used_map as f64 / num_samplesf),
             ("`ChildMap.cap` / sample", tot_reserved_map as f64 / num_samplesf),
+            ("% used `ChildMap`", 100. * tot_used_map as f64 / tot_reserved_map as f64),
             ("`ChildMap` MB / sample", tot_res_map_b as f64 / MEGA / num_samplesf),
 
-            ("MB reserved / sample", total_bytes_reserved as f64 / MEGA / num_samplesf),
-            ("B reserved / iter", total_bytes_reserved as f64 / total_itersf),
-            ("`Node`s / iter", num_nodes as f64 / total_itersf),
+            ("MB / sample", total_bytes_reserved as f64 / MEGA / num_samplesf),
+            ("B / iter", total_bytes_reserved as f64 / total_itersf),
             ("% unaccounted mem", pct_unaccounted),
             ("proc phys MB / sample", proc_phys / MEGA / num_samplesf),
             ("proc virt MB / sample", stats.virt_mem_usage.mean() / MEGA),
 
+            ("`Node`s / iter", num_nodes as f64 / total_itersf),
+            ("% explored `MoveNode`s", 100. * tot_used_map as f64 / tot_used_movenodes as f64),
             ("iters / sample", total_itersf / num_samplesf),
             ("iters / sec", total_itersf * 1000. / total_time_ms),
             ("iters / sec / thread", total_itersf * 1000. / total_thread_time_ms),
