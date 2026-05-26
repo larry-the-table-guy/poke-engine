@@ -138,14 +138,21 @@ impl Stats {
                 unsafe { &*std::ptr::with_exposed_provenance::<poke_engine::mcts::Node>(k.0) };
             tmp_node_num_children_hist.inc(k.0 as u64);
             self.node_len.inc(v.len() as u64);
-            self.node_cap.inc(v.capacity() as u64);
+            self.node_cap.inc(v.len() as u64);
             for node in v {
-                let s1 = node.s1_options.as_ref().unwrap_or(const { &Vec::new() });
+                // absolute nonsense
+                let s1 = node
+                    .s1_options
+                    .as_ref()
+                    .map_or(&[] as &[_], |v| v.iter().as_slice());
                 self.move_node_len.inc(s1.len() as u64);
-                self.move_node_cap.inc(s1.capacity() as u64);
-                let s2 = node.s2_options.as_ref().unwrap_or(const { &Vec::new() });
+                self.move_node_cap.inc(s1.len() as u64);
+                let s2 = node
+                    .s2_options
+                    .as_ref()
+                    .map_or(&[] as &[_], |v| v.iter().as_slice());
                 self.move_node_len.inc(s2.len() as u64);
-                self.move_node_cap.inc(s2.capacity() as u64);
+                self.move_node_cap.inc(s2.len() as u64);
                 self.options_product.inc(s1.len() as u64 * s2.len() as u64);
                 let ins = &node.instructions.instruction_list;
                 self.instr_list_len.inc(ins.len() as u64);
