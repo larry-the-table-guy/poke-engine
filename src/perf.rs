@@ -1,5 +1,25 @@
 //! Low-level implementation details
 
+/// Cumulative nanoseconds spent in each step of MCTS
+#[derive(Default, Clone, Debug)]
+#[repr(C)]
+pub struct Timers {
+    pub selection: u64,
+    pub expand: u64,
+    pub rollout: u64,
+    pub backpropagate: u64,
+    /// For multithreading; Time spent waiting on other threads.
+    pub idle: u64,
+}
+impl Timers {
+    pub fn add(&mut self, other: &Timers) {
+        self.selection += other.selection;
+        self.expand += other.expand;
+        self.rollout += other.rollout;
+        self.backpropagate += other.backpropagate;
+    }
+}
+
 // A thin boxed slice with two sections.
 //
 // Follows the design of other thin smart pointers pretty closely.
