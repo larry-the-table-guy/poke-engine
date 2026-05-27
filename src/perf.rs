@@ -137,3 +137,44 @@ mod move_options {
     {
     }
 }
+
+#[cfg(test)]
+mod tests {
+    // Run with 'cargo miri test' for more useful assertions about provenance and such
+    #[test]
+    fn node_options() {
+        use crate::engine::state::MoveChoice;
+        type NodeOptions = super::NodeOptions<MoveNode>;
+        #[derive(Debug, PartialEq)]
+        struct MoveNode(MoveChoice, f32, u32);
+        // we don't expect to instantiate this with empty lists, but the logic should handle it.
+        let s1 = &[];
+        let s2 = &[];
+        let a = NodeOptions::new(s1, s2, |mc| MoveNode(mc, 0., 0));
+        assert_eq!(a.s1().len(), 0);
+        assert_eq!(a.s2().len(), 0);
+
+        let s1 = &[MoveChoice::None, MoveChoice::None];
+        let s2 = &[MoveChoice::None];
+        let mut a = NodeOptions::new(s1, s2, |mc| MoveNode(mc, 2., 3));
+        assert_eq!(&a.s1().iter().map(|n| n.0).collect::<Vec<_>>(), s1);
+        assert_eq!(&a.s2().iter().map(|n| n.0).collect::<Vec<_>>(), s2);
+        a.s2_mut()[0].2 += 2;
+        assert_eq!(&a.s1().iter().map(|n| n.0).collect::<Vec<_>>(), s1);
+        assert_eq!(&a.s2().iter().map(|n| n.0).collect::<Vec<_>>(), s2);
+
+        let s1 = &[MoveChoice::None, MoveChoice::None];
+        let s2 = &[
+            MoveChoice::None,
+            MoveChoice::None,
+            MoveChoice::None,
+            MoveChoice::None,
+        ];
+        let mut a = NodeOptions::new(s1, s2, |mc| MoveNode(mc, 2., 3));
+        assert_eq!(&a.s1().iter().map(|n| n.0).collect::<Vec<_>>(), s1);
+        assert_eq!(&a.s2().iter().map(|n| n.0).collect::<Vec<_>>(), s2);
+        a.s1_mut()[1].2 += 2;
+        assert_eq!(&a.s1().iter().map(|n| n.0).collect::<Vec<_>>(), s1);
+        assert_eq!(&a.s2().iter().map(|n| n.0).collect::<Vec<_>>(), s2);
+    }
+}
