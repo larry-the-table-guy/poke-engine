@@ -140,20 +140,18 @@ impl Stats {
             self.node_len.inc(v.len() as u64);
             self.node_cap.inc(v.len() as u64);
             for node in v {
-                // absolute nonsense
-                let s1 = node
-                    .s1_options
-                    .as_ref()
-                    .map_or(&[] as &[_], |v| v.iter().as_slice());
-                self.move_node_len.inc(s1.len() as u64);
-                self.move_node_cap.inc(s1.len() as u64);
-                let s2 = node
-                    .s2_options
-                    .as_ref()
-                    .map_or(&[] as &[_], |v| v.iter().as_slice());
-                self.move_node_len.inc(s2.len() as u64);
-                self.move_node_cap.inc(s2.len() as u64);
-                self.options_product.inc(s1.len() as u64 * s2.len() as u64);
+                if let Some(options) = node.options.as_ref() {
+                    self.move_node_len.inc(options.s1().len() as u64);
+                    self.move_node_cap.inc(options.s1().len() as u64);
+                    self.move_node_len.inc(options.s2().len() as u64);
+                    self.move_node_cap.inc(options.s2().len() as u64);
+                    self.options_product
+                        .inc(options.s1().len() as u64 * options.s2().len() as u64);
+                } else {
+                    self.move_node_len.add(0, 2);
+                    self.move_node_cap.add(0, 2);
+                    self.options_product.inc(0);
+                }
                 let ins = &node.instructions.instruction_list;
                 self.instr_list_len.inc(ins.len() as u64);
                 self.instr_list_cap.inc(ins.capacity() as u64);
@@ -166,8 +164,7 @@ impl Stats {
                     depth += 1;
                 }
                 self.node_depth.inc(depth);
-                if node.s1_options.is_none() {
-                    assert!(node.s2_options.is_none());
+                if node.options.is_none() {
                     self.leaf_node_depth.inc(depth);
                 }
 
@@ -192,19 +189,19 @@ impl Stats {
             self.node_cap.inc(v.len() as u64);
             for node in v.iter() {
                 if let Some(options) = node.options.get() {
-                    self.move_node_len.inc(options.s1.len() as u64);
-                    self.move_node_cap.inc(options.s1.len() as u64);
-                    self.move_node_len.inc(options.s2.len() as u64);
-                    self.move_node_cap.inc(options.s2.len() as u64);
+                    self.move_node_len.inc(options.s1().len() as u64);
+                    self.move_node_cap.inc(options.s1().len() as u64);
+                    self.move_node_len.inc(options.s2().len() as u64);
+                    self.move_node_cap.inc(options.s2().len() as u64);
                     self.options_product
-                        .inc(options.s1.len() as u64 * options.s2.len() as u64);
+                        .inc(options.s1().len() as u64 * options.s2().len() as u64);
                 }
                 let ins = &node.instructions.instruction_list;
                 self.instr_list_len.inc(ins.len() as u64);
                 self.instr_list_cap.inc(ins.capacity() as u64);
 
                 self.node_depth.inc(node.depth as u64);
-                if node.options.get().is_none_or(|s| s.s1.is_empty()) {
+                if node.options.get().is_none_or(|s| s.s1().is_empty()) {
                     self.leaf_node_depth.inc(node.depth as u64);
                 }
 

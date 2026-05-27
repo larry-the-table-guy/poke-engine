@@ -18,6 +18,8 @@ const MCTS_DAMAGE_BRANCH_DEPTH: u8 = 2;
 const SCORE_SCALE: f32 = 400.0;
 const VIRTUAL_LOSS_VISITS: u32 = 3;
 
+pub type SharedNodeOptions = crate::perf::NodeOptions<MoveNode>;
+
 pub type ChildMapK = (usize, usize, usize);
 pub type ChildMapV = SharedBranch;
 // Node map type alias for clarity.
@@ -74,20 +76,6 @@ impl MoveNode {
     }
 }
 
-pub struct SharedNodeOptions {
-    pub s1: Box<[MoveNode]>,
-    pub s2: Box<[MoveNode]>,
-}
-
-impl SharedNodeOptions {
-    fn new(s1_options: Vec<MoveChoice>, s2_options: Vec<MoveChoice>) -> Self {
-        Self {
-            s1: s1_options.into_iter().map(MoveNode::new).collect(),
-            s2: s2_options.into_iter().map(MoveNode::new).collect(),
-        }
-    }
-}
-
 pub struct SharedBranch {
     pub nodes: Arc<[Node]>,
     pub total_weight: f32,
@@ -135,9 +123,11 @@ impl Node {
             virtual_losses: AtomicI8::new(0),
             options: OnceLock::new(),
         });
-        let _ = node
-            .options
-            .set(SharedNodeOptions::new(s1_options, s2_options));
+        let _ = node.options.set(SharedNodeOptions::new(
+            &s1_options,
+            &s2_options,
+            MoveNode::new,
+        ));
         node
     }
 
@@ -159,7 +149,7 @@ impl Node {
     fn ensure_options(&self, state: &State) -> &SharedNodeOptions {
         self.options.get_or_init(|| {
             let (s1, s2) = state.get_all_options();
-            SharedNodeOptions::new(s1, s2)
+            SharedNodeOptions::new(&s1, &s2, MoveNode::new)
         })
     }
 
@@ -171,8 +161,8 @@ impl Node {
             .saturating_add(self.virtual_losses.load(Ordering::Acquire).max(0) as u32)
             .max(1);
         (
-            self.maximize_ucb_for_side(&options.s1, parent_visits),
-            self.maximize_ucb_for_side(&options.s2, parent_visits),
+            self.maximize_ucb_for_side(options.s1(), parent_visits),
+            self.maximize_ucb_for_side(options.s2(), parent_visits),
         )
     }
 
@@ -200,8 +190,8 @@ impl Node {
 
                     let child_ref = unsafe { &*child };
 
-                    options.s1[s1_index].add_virtual_loss();
-                    options.s2[s2_index].add_virtual_loss();
+                    options.s1()[s1_index].add_virtual_loss();
+                    options.s2()[s2_index].add_virtual_loss();
                     child_ref.virtual_losses.fetch_add(1, Ordering::AcqRel);
                     state.apply_instructions(&child_ref.instructions.instruction_list);
                     path.push(PathStep {
@@ -248,8 +238,8 @@ impl Node {
             .options
             .get()
             .expect("options initialised before expand");
-        let s1_move = &options.s1[s1_index].move_choice;
-        let s2_move = &options.s2[s2_index].move_choice;
+        let s1_move = &options.s1()[s1_index].move_choice;
+        let s2_move = &options.s2()[s2_index].move_choice;
 
         if (state.battle_is_over() != 0.0 && !self.root)
             || (s1_move == &MoveChoice::None && s2_move == &MoveChoice::None)
@@ -303,10 +293,10 @@ impl Node {
         for step in path.iter().rev() {
             let (parent, child) = unsafe { (&*step.parent, &*step.child) };
             let options = parent.options.get().expect("path parent has options");
-            options.s1[step.s1_index].add_result(score);
-            options.s1[step.s1_index].remove_virtual_loss();
-            options.s2[step.s2_index].add_result(1.0 - score);
-            options.s2[step.s2_index].remove_virtual_loss();
+            options.s1()[step.s1_index].add_result(score);
+            options.s1()[step.s1_index].remove_virtual_loss();
+            options.s2()[step.s2_index].add_result(1.0 - score);
+            options.s2()[step.s2_index].remove_virtual_loss();
             parent.times_visited.fetch_add(1, Ordering::AcqRel);
             child.virtual_losses.fetch_sub(1, Ordering::AcqRel);
             state.reverse_instructions(&child.instructions.instruction_list);
@@ -331,8 +321,8 @@ fn do_mcts<R: Rng + ?Sized>(
     let selection_end = Instant::now();
 
     let options = leaf.options.get().expect("options set during selection");
-    options.s1[s1_index].add_virtual_loss();
-    options.s2[s2_index].add_virtual_loss();
+    options.s1()[s1_index].add_virtual_loss();
+    options.s2()[s2_index].add_virtual_loss();
     let expanded = leaf.expand(state, s1_index, s2_index, rng, children);
     let expand_end = Instant::now();
     let rollout_target = match expanded {
@@ -355,8 +345,8 @@ fn do_mcts<R: Rng + ?Sized>(
         // we do a rollout on the leaf and backpropagate without adding a child to the tree
         None => {
             // remove the virtual loss we added before expansion, since we're not actually expanding
-            options.s1[s1_index].remove_virtual_loss();
-            options.s2[s2_index].remove_virtual_loss();
+            options.s1()[s1_index].remove_virtual_loss();
+            options.s2()[s2_index].remove_virtual_loss();
             leaf
         }
     };
@@ -454,7 +444,7 @@ pub fn perform_mcts_shared_tree_inner(
     let options = root.options.get().expect("root options initialized");
     let result = MctsResult {
         s1: options
-            .s1
+            .s1()
             .iter()
             .map(|v| MctsSideResult {
                 move_choice: v.move_choice,
@@ -463,7 +453,7 @@ pub fn perform_mcts_shared_tree_inner(
             })
             .collect(),
         s2: options
-            .s2
+            .s2()
             .iter()
             .map(|v| MctsSideResult {
                 move_choice: v.move_choice,
