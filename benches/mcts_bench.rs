@@ -51,22 +51,37 @@ fn main() {
         "diff" => {
             let files = args;
             let mut buf = Vec::<u8>::new();
+            let mut title = None;
+            let mut short = false;
             let reports = files
                 .iter()
+                .filter(|s| {
+                    if let Some(t) = s.strip_prefix("--title=") {
+                        title = Some(t);
+                        false
+                    } else if *s == "--short" {
+                        short = true;
+                        false
+                    } else {
+                        true
+                    }
+                })
                 .map(|s| {
                     buf.clear();
                     let p = std::path::Path::new(&s);
                     let mut file = std::fs::OpenOptions::new().read(true).open(p).unwrap();
                     file.read_to_end(&mut buf).unwrap();
                     let (a, b) = binary_deserialize(buf.as_slice());
-                    (s.as_str(), a, b)
+                    // was originally a str, and we managed to open it as a file so it's not ".."
+                    let name = p.file_name().unwrap().to_str().unwrap().to_owned();
+                    (name, a, b)
                 })
                 .collect::<Vec<_>>();
             let reports = reports
                 .iter()
-                .map(|r| (r.0, &r.1, &r.2))
+                .map(|r| (r.0.as_str(), &r.1, &r.2))
                 .collect::<Vec<_>>();
-            diff(reports.as_slice());
+            diff(reports.as_slice(), short, title);
         }
         "print-hashes" => {
             let mut input = Vec::with_capacity(4096 * 2);
@@ -241,12 +256,12 @@ impl ElemSizes {
 
 type Report<'a> = (&'a str, &'a BinHeader, &'a Stats);
 
-fn diff(reports: &[Report]) {
+fn diff(reports: &[Report], short: bool, title: Option<&str>) {
     let Some((baseline, others)) = reports.split_first() else {
         return;
     };
     if others.len() != 1 {
-        println!("# State hashes\n");
+        println!("### State hashes\n");
         println!(
             "'{}' (Baseline) has {} states",
             baseline.0,
@@ -265,10 +280,13 @@ fn diff(reports: &[Report]) {
                 baseline.2.state_hash.unweighted_sum()
             );
         }
+        println!("\n");
     }
-    println!("\n");
 
-    println!("<details><summary><h1>Summary</h1></summary>\n");
+    println!(
+        "<details><summary><h1>{}</h1></summary>\n",
+        title.unwrap_or("Summary")
+    );
 
     print!("| {:^29} | {:^14} |", "Property", "Baseline",);
     for other in others {
@@ -404,12 +422,12 @@ fn diff(reports: &[Report]) {
     }
     println!("\n</details>\n");
 
+    if short {
+        return;
+    }
+
     println!("# Histograms\n");
 
-    render_hists(reports);
-}
-
-fn render_hists(reports: &[Report]) {
     for (hist_idx, (hist_name, display_type)) in
         Stats::LABELS.iter().zip(Stats::DISPLAY_TYPE).enumerate()
     {

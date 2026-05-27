@@ -1,5 +1,6 @@
 **/dist
 /target
+benches/reports
 .idea/
 .vscode
 *.so
