@@ -195,6 +195,10 @@ impl Stats {
                     self.move_node_cap.inc(options.s2().len() as u64);
                     self.options_product
                         .inc(options.s1().len() as u64 * options.s2().len() as u64);
+                } else {
+                    self.move_node_len.add(0, 2);
+                    self.move_node_cap.add(0, 2);
+                    self.options_product.inc(0);
                 }
                 let ins = &node.instructions.instruction_list;
                 self.instr_list_len.inc(ins.len() as u64);
