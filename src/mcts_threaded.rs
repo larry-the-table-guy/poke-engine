@@ -21,7 +21,7 @@ const VIRTUAL_LOSS_VISITS: u32 = 3;
 
 pub type SharedNodeOptions = crate::perf::NodeOptions<MoveNode>;
 
-pub type ChildMapK = (usize, usize, usize);
+pub type ChildMapK = (usize, u8, u8);
 pub type ChildMapV = SharedBranch;
 // Node map type alias for clarity.
 // key: (parent node address, s1_move_index, s2_move_index)
@@ -101,8 +101,8 @@ impl SharedBranch {
 struct PathStep {
     parent: *const Node,
     child: *const Node,
-    s1_index: usize,
-    s2_index: usize,
+    s1_index: u8,
+    s2_index: u8,
 }
 
 pub struct Node {
@@ -154,7 +154,7 @@ impl Node {
         })
     }
 
-    fn select_move_pair(&self, state: &State) -> (usize, usize) {
+    fn select_move_pair(&self, state: &State) -> (u8, u8) {
         let options = self.ensure_options(state);
         let parent_visits = self
             .times_visited
@@ -173,7 +173,7 @@ impl Node {
         rng: &mut R,
         children: &ChildMap,
         path: &mut Vec<PathStep>,
-    ) -> (*const Node, usize, usize) {
+    ) -> (*const Node, u8, u8) {
         // raw pointers walk both the root (a standalone Arc<Node>) and children
         // (Nodes living inside a branch's Arc<[Node]>) uniformly. every node is
         // owned by children/root for the whole search, so the pointers stay
@@ -197,8 +197,8 @@ impl Node {
 
                     let child_ref = unsafe { &*child };
 
-                    options.s1()[s1_index].add_virtual_loss();
-                    options.s2()[s2_index].add_virtual_loss();
+                    options.s1()[s1_index as usize].add_virtual_loss();
+                    options.s2()[s2_index as usize].add_virtual_loss();
                     child_ref.virtual_losses.fetch_add(1, Ordering::AcqRel);
                     state.apply_instructions(&child_ref.instructions.instruction_list);
                     path.push(PathStep {
@@ -217,7 +217,7 @@ impl Node {
         }
     }
 
-    fn maximize_ucb_for_side(&self, side_options: &[MoveNode], parent_visits: u32) -> usize {
+    fn maximize_ucb_for_side(&self, side_options: &[MoveNode], parent_visits: u32) -> u8 {
         side_options
             .iter()
             .enumerate()
@@ -226,7 +226,7 @@ impl Node {
                     .partial_cmp(&b.ucb1(parent_visits))
                     .unwrap_or(std::cmp::Ordering::Equal)
             })
-            .map(|(i, _)| i)
+            .map(|(i, _)| i as u8)
             .unwrap_or(0)
     }
 
@@ -236,8 +236,8 @@ impl Node {
     fn expand<R: Rng + ?Sized>(
         &self,
         state: &mut State,
-        s1_index: usize,
-        s2_index: usize,
+        s1_index: u8,
+        s2_index: u8,
         rng: &mut R,
         children: &ChildMap,
     ) -> Option<*const Node> {
@@ -245,8 +245,8 @@ impl Node {
             .options
             .get()
             .expect("options initialised before expand");
-        let s1_move = &options.s1()[s1_index].move_choice;
-        let s2_move = &options.s2()[s2_index].move_choice;
+        let s1_move = &options.s1()[s1_index as usize].move_choice;
+        let s2_move = &options.s2()[s2_index as usize].move_choice;
 
         if (state.battle_is_over() != 0.0 && !self.root)
             || (s1_move == &MoveChoice::None && s2_move == &MoveChoice::None)
@@ -300,10 +300,10 @@ impl Node {
         for step in path.iter().rev() {
             let (parent, child) = unsafe { (&*step.parent, &*step.child) };
             let options = parent.options.get().expect("path parent has options");
-            options.s1()[step.s1_index].add_result(score);
-            options.s1()[step.s1_index].remove_virtual_loss();
-            options.s2()[step.s2_index].add_result(1.0 - score);
-            options.s2()[step.s2_index].remove_virtual_loss();
+            options.s1()[step.s1_index as usize].add_result(score);
+            options.s1()[step.s1_index as usize].remove_virtual_loss();
+            options.s2()[step.s2_index as usize].add_result(1.0 - score);
+            options.s2()[step.s2_index as usize].remove_virtual_loss();
             parent.times_visited.fetch_add(1, Ordering::AcqRel);
             child.virtual_losses.fetch_sub(1, Ordering::AcqRel);
             state.reverse_instructions(&child.instructions.instruction_list);
@@ -328,8 +328,8 @@ fn do_mcts<R: Rng + ?Sized>(
     let selection_end = Instant::now();
 
     let options = leaf.options.get().expect("options set during selection");
-    options.s1()[s1_index].add_virtual_loss();
-    options.s2()[s2_index].add_virtual_loss();
+    options.s1()[s1_index as usize].add_virtual_loss();
+    options.s2()[s2_index as usize].add_virtual_loss();
     let expanded = leaf.expand(state, s1_index, s2_index, rng, children);
     let expand_end = Instant::now();
     let rollout_target = match expanded {
@@ -352,8 +352,8 @@ fn do_mcts<R: Rng + ?Sized>(
         // we do a rollout on the leaf and backpropagate without adding a child to the tree
         None => {
             // remove the virtual loss we added before expansion, since we're not actually expanding
-            options.s1()[s1_index].remove_virtual_loss();
-            options.s2()[s2_index].remove_virtual_loss();
+            options.s1()[s1_index as usize].remove_virtual_loss();
+            options.s2()[s2_index as usize].remove_virtual_loss();
             leaf
         }
     };
