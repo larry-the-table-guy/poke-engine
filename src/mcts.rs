@@ -17,7 +17,7 @@ fn sigmoid(x: f32) -> f32 {
 
 pub type NodeOptions = crate::perf::NodeOptions<MoveNode>;
 
-pub type ChildMapK = (usize, usize, usize);
+pub type ChildMapK = (usize, u8, u8);
 pub type ChildMapV = Box<[Node]>;
 pub type ChildMap = HashMap<ChildMapK, ChildMapV>;
 
@@ -49,7 +49,7 @@ impl Node {
         }
     }
 
-    pub fn maximize_ucb_for_side(&self, side_map: &[MoveNode]) -> usize {
+    pub fn maximize_ucb_for_side(&self, side_map: &[MoveNode]) -> u8 {
         let mut choice = 0;
         let mut best_ucb1 = f32::MIN;
         for (index, node) in side_map.iter().enumerate() {
@@ -59,14 +59,14 @@ impl Node {
                 choice = index;
             }
         }
-        choice
+        choice as u8
     }
 
     pub unsafe fn selection(
         &mut self,
         state: &mut State,
         children: &mut ChildMap,
-    ) -> (*mut Node, usize, usize) {
+    ) -> (*mut Node, u8, u8) {
         self.options.get_or_insert_with(|| {
             let (s1_options, s2_options) = state.get_all_options();
             NodeOptions::new(&s1_options, &s2_options, MoveNode::from_move_choice)
@@ -101,12 +101,12 @@ impl Node {
     pub unsafe fn expand(
         &mut self,
         state: &mut State,
-        s1_move_index: usize,
-        s2_move_index: usize,
+        s1_move_index: u8,
+        s2_move_index: u8,
         children: &mut ChildMap,
     ) -> *mut Node {
-        let s1_move = &self.options.as_ref().unwrap().s1()[s1_move_index].move_choice;
-        let s2_move = &self.options.as_ref().unwrap().s2()[s2_move_index].move_choice;
+        let s1_move = &self.options.as_ref().unwrap().s1()[s1_move_index as usize].move_choice;
+        let s2_move = &self.options.as_ref().unwrap().s2()[s2_move_index as usize].move_choice;
         // if the battle is over or both moves are none there is no need to expand
         if (state.battle_is_over() != 0.0 && !self.root)
             || (s1_move == &MoveChoice::None && s2_move == &MoveChoice::None)
