@@ -76,7 +76,10 @@ fn main() {
                 .map(|s| {
                     buf.clear();
                     let p = std::path::Path::new(s);
-                    let mut file = std::fs::OpenOptions::new().read(true).open(p).unwrap();
+                    let mut file = match std::fs::OpenOptions::new().read(true).open(p) {
+                        Ok(f) => f,
+                        Err(e) => panic!("Error: {} for '{}'", e, s),
+                    };
                     file.read_to_end(&mut buf).unwrap();
                     let (a, b) = binary_deserialize(buf.as_slice());
                     // was originally a str, and we managed to open it as a file so it's not ".."
