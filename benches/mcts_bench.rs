@@ -49,11 +49,10 @@ fn main() {
             bench_mcts(num_threads, max_time, skip_stats);
         }
         "diff" => {
-            let files = args;
-            let mut buf = Vec::<u8>::new();
             let mut title = None;
             let mut short = false;
-            let reports = files
+            let mut skip_identical = false;
+            let files = args
                 .iter()
                 .filter(|s| {
                     if let Some(t) = s.strip_prefix("--title=") {
@@ -62,13 +61,21 @@ fn main() {
                     } else if *s == "--short" {
                         short = true;
                         false
+                    } else if *s == "--skip-identical" {
+                        skip_identical = true;
+                        false
                     } else {
                         true
                     }
                 })
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>();
+            let mut buf = Vec::<u8>::new();
+            let reports = files
+                .iter()
                 .map(|s| {
                     buf.clear();
-                    let p = std::path::Path::new(&s);
+                    let p = std::path::Path::new(s);
                     let mut file = std::fs::OpenOptions::new().read(true).open(p).unwrap();
                     file.read_to_end(&mut buf).unwrap();
                     let (a, b) = binary_deserialize(buf.as_slice());
@@ -81,7 +88,7 @@ fn main() {
                 .iter()
                 .map(|r| (r.0.as_str(), &r.1, &r.2))
                 .collect::<Vec<_>>();
-            diff(reports.as_slice(), short, title);
+            diff(reports.as_slice(), short, skip_identical, title);
         }
         "print-hashes" => {
             let mut input = Vec::with_capacity(4096 * 2);
@@ -256,7 +263,7 @@ impl ElemSizes {
 
 type Report<'a> = (&'a str, &'a BinHeader, &'a Stats);
 
-fn diff(reports: &[Report], short: bool, title: Option<&str>) {
+fn diff(reports: &[Report], short: bool, skip_identical: bool, title: Option<&str>) {
     let Some((baseline, others)) = reports.split_first() else {
         return;
     };
@@ -410,12 +417,17 @@ fn diff(reports: &[Report], short: bool, title: Option<&str>) {
         .map(|v| prop_fn(v).map(|t| t.1))
         .collect::<Vec<_>>();
     for (prop_idx, (name, baseline_v)) in baseline_props.iter().enumerate() {
+        if skip_identical
+            && others.len() != 0
+            && other_props.iter().all(|o_vs| o_vs[prop_idx] == *baseline_v)
+        {
+            continue;
+        }
         print!("| {:29} | {:14.2} |", name, baseline_v,);
         for o_v in other_props.iter() {
             let o_v = o_v[prop_idx];
             let change = o_v - baseline_v;
             let relative = o_v / baseline_v;
-            // TODO: maybe an option to leave change column blank when identical
             print!(" {:14.2} | {:+14.2} | {:8.3} |", o_v, change, relative);
         }
         println!();
