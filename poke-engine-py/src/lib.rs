@@ -18,7 +18,7 @@ use poke_engine::search::iterative_deepen_expectiminimax;
 use poke_engine::state::{
     LastUsedMove, Move, Pokemon, PokemonIndex, PokemonMoves, PokemonNature, PokemonStatus,
     PokemonType, Side, SideConditions, SidePokemon, State, StateTerrain, StateTrickRoom,
-    StateWeather, VolatileStatusDurations,
+    StateWeather, VolatileStatusBitSet, VolatileStatusDurations,
 };
 use std::str::FromStr;
 use std::time::Duration;
@@ -240,12 +240,11 @@ impl Into<Side> for PySide {
             force_switch: self.force_switch,
             force_trapped: self.force_trapped,
             slow_uturn_move: self.slow_uturn_move,
-            volatile_statuses: self
-                .volatile_statuses
-                .iter()
-                .map(|s| PokemonVolatileStatus::from_str(s))
-                .collect::<Result<HashSet<_>, _>>()
-                .unwrap(),
+            volatile_statuses: VolatileStatusBitSet::from_iter(
+                self.volatile_statuses
+                    .iter()
+                    .map(|s| PokemonVolatileStatus::from_str(s).unwrap()),
+            ),
             substitute_health: self.substitute_health,
             attack_boost: self.attack_boost,
             defense_boost: self.defense_boost,

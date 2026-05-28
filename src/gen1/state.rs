@@ -7,10 +7,10 @@ use crate::instruction::{
 use crate::state::{
     LastUsedMove, Pokemon, PokemonBoostableStat, PokemonIndex, PokemonMoveIndex,
     PokemonSideCondition, PokemonStatus, PokemonType, Side, SideReference, State,
+    VolatileStatusBitSet,
 };
 use core::panic;
 use std::cmp;
-use std::collections::HashSet;
 
 fn multiply_boost(boost_num: i8, stat_value: i16) -> i16 {
     match boost_num {
@@ -273,7 +273,7 @@ impl Pokemon {
     pub fn volatile_status_can_be_applied(
         &self,
         volatile_status: &PokemonVolatileStatus,
-        active_volatiles: &HashSet<PokemonVolatileStatus>,
+        active_volatiles: &VolatileStatusBitSet,
         first_move: bool,
     ) -> bool {
         if active_volatiles.contains(volatile_status) || self.hp == 0 {
@@ -301,7 +301,7 @@ impl Pokemon {
     pub fn immune_to_stats_lowered_by_opponent(
         &self,
         _stat: &PokemonBoostableStat,
-        volatiles: &HashSet<PokemonVolatileStatus>,
+        volatiles: &VolatileStatusBitSet,
     ) -> bool {
         if volatiles.contains(&PokemonVolatileStatus::SUBSTITUTE) {
             return true;
@@ -598,15 +598,15 @@ impl State {
         vec_to_add_to: &mut Vec<Instruction>,
     ) {
         let side = self.get_side(side_ref);
-        for pkmn_volatile_status in &side.volatile_statuses {
+        for pkmn_volatile_status in side.volatile_statuses.iter() {
             vec_to_add_to.push(Instruction::RemoveVolatileStatus(
                 RemoveVolatileStatusInstruction {
                     side_ref: *side_ref,
-                    volatile_status: *pkmn_volatile_status,
+                    volatile_status: pkmn_volatile_status,
                 },
             ));
         }
-        side.volatile_statuses.drain();
+        side.volatile_statuses.clear();
     }
 
     pub fn terrain_is_active(&self, terrain: &Terrain) -> bool {
