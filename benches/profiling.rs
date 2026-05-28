@@ -1,6 +1,6 @@
 //! Structs that track relevant properties of the MCTS search
 
-use poke_engine::mcts::Timers;
+use poke_engine::Timers;
 use std::collections::BTreeMap;
 
 /// How a histogram should be displayed

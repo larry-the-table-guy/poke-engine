@@ -9,9 +9,9 @@ use crate::instruction::{
 use crate::state::{
     LastUsedMove, Pokemon, PokemonBoostableStat, PokemonIndex, PokemonMoveIndex,
     PokemonSideCondition, PokemonStatus, PokemonType, Side, SideReference, State,
+    VolatileStatusBitSet,
 };
 use core::panic;
-use std::collections::HashSet;
 
 fn multiply_boost(boost_num: i8, stat_value: i16) -> i16 {
     match boost_num {
@@ -271,7 +271,7 @@ impl Pokemon {
     pub fn volatile_status_can_be_applied(
         &self,
         volatile_status: &PokemonVolatileStatus,
-        active_volatiles: &HashSet<PokemonVolatileStatus>,
+        active_volatiles: &VolatileStatusBitSet,
         first_move: bool,
     ) -> bool {
         if active_volatiles.contains(volatile_status) || self.hp == 0 {
@@ -307,7 +307,7 @@ impl Pokemon {
     pub fn immune_to_stats_lowered_by_opponent(
         &self,
         stat: &PokemonBoostableStat,
-        volatiles: &HashSet<PokemonVolatileStatus>,
+        volatiles: &VolatileStatusBitSet,
     ) -> bool {
         if [Abilities::CLEARBODY, Abilities::WHITESMOKE].contains(&self.ability) {
             return true;
@@ -330,7 +330,7 @@ impl Pokemon {
 impl Side {
     pub fn active_is_charging_move(&self) -> Option<PokemonMoveIndex> {
         for volatile in self.volatile_statuses.iter() {
-            if let Some(choice) = charge_volatile_to_choice(volatile) {
+            if let Some(choice) = charge_volatile_to_choice(&volatile) {
                 let mut iter = self.get_active_immutable().moves.into_iter();
                 while let Some(mv) = iter.next() {
                     if mv.id == choice {
@@ -682,7 +682,7 @@ impl State {
                     instructions.push(Instruction::ChangeVolatileStatusDuration(
                         ChangeVolatileStatusDurationInstruction {
                             side_ref: *side_ref,
-                            volatile_status: *pkmn_volatile_status,
+                            volatile_status: pkmn_volatile_status,
                             amount: -1 * side.volatile_status_durations.lockedmove,
                         },
                     ));
@@ -693,7 +693,7 @@ impl State {
                     instructions.push(Instruction::ChangeVolatileStatusDuration(
                         ChangeVolatileStatusDurationInstruction {
                             side_ref: *side_ref,
-                            volatile_status: *pkmn_volatile_status,
+                            volatile_status: pkmn_volatile_status,
                             amount: -1 * side.volatile_status_durations.yawn,
                         },
                     ));
@@ -704,7 +704,7 @@ impl State {
                     instructions.push(Instruction::ChangeVolatileStatusDuration(
                         ChangeVolatileStatusDurationInstruction {
                             side_ref: *side_ref,
-                            volatile_status: *pkmn_volatile_status,
+                            volatile_status: pkmn_volatile_status,
                             amount: -1 * side.volatile_status_durations.taunt,
                         },
                     ));
@@ -718,7 +718,7 @@ impl State {
                 instructions.push(Instruction::RemoveVolatileStatus(
                     RemoveVolatileStatusInstruction {
                         side_ref: *side_ref,
-                        volatile_status: *pkmn_volatile_status,
+                        volatile_status: pkmn_volatile_status,
                     },
                 ));
             }

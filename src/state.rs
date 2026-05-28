@@ -5,9 +5,10 @@ use crate::engine::items::Items;
 use crate::engine::state::{PokemonVolatileStatus, Terrain, Weather};
 use crate::instruction::{BoostInstruction, EnableMoveInstruction, Instruction};
 use crate::pokemon::PokemonName;
-use std::collections::HashSet;
 use std::ops::{Index, IndexMut};
 use std::str::FromStr;
+
+pub use crate::perf::VolatileStatusBitSet;
 
 #[derive(Debug, PartialEq, Copy, Clone)]
 pub enum SideReference {
@@ -460,7 +461,7 @@ impl Default for Side {
                 ..Default::default()
             },
             volatile_status_durations: VolatileStatusDurations::default(),
-            volatile_statuses: HashSet::<PokemonVolatileStatus>::new(),
+            volatile_statuses: VolatileStatusBitSet::new(),
             wish: (0, 0),
             future_sight: (0, PokemonIndex::P0),
             force_switch: false,
@@ -998,7 +999,7 @@ pub struct Side {
     pub force_switch: bool,
     pub force_trapped: bool,
     pub slow_uturn_move: bool,
-    pub volatile_statuses: HashSet<PokemonVolatileStatus>,
+    pub volatile_statuses: VolatileStatusBitSet,
     pub substitute_health: i16,
     pub attack_boost: i8,
     pub defense_boost: i8,
@@ -1079,7 +1080,7 @@ impl Side {
     }
     pub fn serialize(&self) -> String {
         let mut vs_string = String::new();
-        for vs in &self.volatile_statuses {
+        for vs in self.volatile_statuses.iter() {
             vs_string.push_str(&vs.to_string());
             vs_string.push_str(":");
         }
@@ -1119,10 +1120,10 @@ impl Side {
     pub fn deserialize(serialized: &str) -> Side {
         let split: Vec<&str> = serialized.split("=").collect();
 
-        let mut vs_hashset = HashSet::new();
+        let mut vs_bitset = VolatileStatusBitSet::new();
         if split[8] != "" {
             for item in split[8].split(":") {
-                vs_hashset.insert(PokemonVolatileStatus::from_str(item).unwrap());
+                vs_bitset.insert(PokemonVolatileStatus::from_str(item).unwrap());
             }
         }
         Side {
@@ -1138,7 +1139,7 @@ impl Side {
             },
             active_index: PokemonIndex::deserialize(split[6]),
             side_conditions: SideConditions::deserialize(split[7]),
-            volatile_statuses: vs_hashset,
+            volatile_statuses: vs_bitset,
             volatile_status_durations: VolatileStatusDurations::deserialize(split[9]),
             substitute_health: split[10].parse::<i16>().unwrap(),
             attack_boost: split[11].parse::<i8>().unwrap(),

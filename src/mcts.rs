@@ -2,6 +2,7 @@ use crate::engine::evaluate::evaluate;
 use crate::engine::generate_instructions::generate_instructions_from_move_pair;
 use crate::engine::state::MoveChoice;
 use crate::instruction::StateInstructions;
+use crate::perf::Timers;
 use crate::state::State;
 use rand::distr::weighted::WeightedIndex;
 use rand::prelude::*;
@@ -254,26 +255,6 @@ pub fn perform_mcts(
     max_time: Duration,
 ) -> MctsResult {
     perform_mcts_inner(state, side_one_options, side_two_options, max_time).0
-}
-
-/// Cumulative nanoseconds spent in each step of MCTS
-#[derive(Default, Clone, Debug)]
-#[repr(C)]
-pub struct Timers {
-    pub selection: u64,
-    pub expand: u64,
-    pub rollout: u64,
-    pub backpropagate: u64,
-    /// For multithreading; Time spent waiting on other threads.
-    pub idle: u64,
-}
-impl Timers {
-    pub fn add(&mut self, other: &Timers) {
-        self.selection += other.selection;
-        self.expand += other.expand;
-        self.rollout += other.rollout;
-        self.backpropagate += other.backpropagate;
-    }
 }
 
 pub fn perform_mcts_inner(
