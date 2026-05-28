@@ -133,6 +133,15 @@ mod move_options {
             }
         }
 
+        /// The largest possible instance should not overflow an isize
+        const _SIZE_ASSERT: () = assert!(
+            size_of::<T>()
+                .checked_mul(u8::MAX as usize * 2)
+                .unwrap()
+                .checked_add(Self::DATA_OFFSET)
+                .unwrap()
+                < isize::MAX as usize
+        );
         fn layout(total_len: u16) -> Layout {
             // SAFETY:
             // - align is not zero
