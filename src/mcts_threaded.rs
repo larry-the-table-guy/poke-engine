@@ -174,7 +174,11 @@ impl Node {
         children: &ChildMap,
         path: &mut Vec<PathStep>,
     ) -> (*const Node, usize, usize) {
-        let mut current = Arc::as_ptr(root);
+        // raw pointers walk both the root (a standalone Arc<Node>) and children
+        // (Nodes living inside a branch's Arc<[Node]>) uniformly. every node is
+        // owned by children/root for the whole search, so the pointers stay
+        // valid
+        let mut current: *const Node = Arc::as_ptr(root);
         loop {
             let node = unsafe { &*current };
             let (s1_index, s2_index) = node.select_move_pair(state);
@@ -186,7 +190,9 @@ impl Node {
                     let child = branch.sample(rng);
 
                     // drop the DashMap ref before mutating state to avoid
-                    // holding the lock any longer than necessary
+                    // holding the lock any longer than necessary. the sampled
+                    // node stays alive via the branch's Arc<[Node]> in the
+                    // ChildMap
                     drop(branch);
 
                     let child_ref = unsafe { &*child };
@@ -197,7 +203,7 @@ impl Node {
                     state.apply_instructions(&child_ref.instructions.instruction_list);
                     path.push(PathStep {
                         parent: current,
-                        child: child,
+                        child,
                         s1_index,
                         s2_index,
                     });
