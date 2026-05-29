@@ -139,7 +139,7 @@ impl Stats {
             self.node_len.inc(v.len() as u64);
             self.node_cap.inc(v.len() as u64);
             for node in v {
-                if let Some(options) = node.options.as_ref() {
+                if let Some(options) = node.options.get() {
                     self.move_node_len.inc(options.s1().len() as u64);
                     self.move_node_cap.inc(options.s1().len() as u64);
                     self.move_node_len.inc(options.s2().len() as u64);
@@ -163,7 +163,7 @@ impl Stats {
                     depth += 1;
                 }
                 self.node_depth.inc(depth);
-                if node.options.is_none() {
+                if node.options.get().is_none() {
                     self.leaf_node_depth.inc(depth);
                 }
 
