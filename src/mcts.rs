@@ -17,6 +17,8 @@ fn sigmoid(x: f32) -> f32 {
     1.0 / (1.0 + (-0.0125 * x).exp())
 }
 
+const MCTS_DAMAGE_BRANCH_DEPTH: usize = 2;
+
 pub type NodeOptions = crate::perf::NodeOptions<MoveNode>;
 
 pub type ChildMapK = (usize, u8, u8);
@@ -25,14 +27,10 @@ pub type ChildMap = HashMap<ChildMapK, ChildMapV>;
 
 #[derive(Debug)]
 pub struct Node {
-    pub root: bool,
-    pub parent: *const Node,
     pub times_visited: Cell<u32>,
 
-    // represents the instructions & s1/s2 moves that led to this node from the parent
+    // represents the instructions that led to this node from the parent
     pub instructions: StateInstructions,
-    pub s1_choice: u8,
-    pub s2_choice: u8,
 
     /// represents the total score and number of visits for this node
     pub options: OnceCell<NodeOptions>,
@@ -41,12 +39,8 @@ pub struct Node {
 impl Node {
     fn new() -> Node {
         Node {
-            root: false,
-            parent: std::ptr::null_mut(),
             instructions: StateInstructions::default(),
             times_visited: Cell::new(0),
-            s1_choice: 0,
-            s2_choice: 0,
             options: OnceCell::new(),
         }
     }
@@ -64,69 +58,80 @@ impl Node {
         choice as u8
     }
 
-    pub unsafe fn selection(
-        &self,
+    fn selection(
+        root: &Node,
         state: &mut State,
         children: &mut ChildMap,
+        path: &mut Vec<PathStep>,
     ) -> (*const Node, u8, u8) {
-        self.options.get_or_init(|| {
-            let (s1_options, s2_options) = state.get_all_options();
-            NodeOptions::new(&s1_options, &s2_options, MoveNode::from_move_choice)
-        });
+        let mut current: *const Node = root;
+        loop {
+            let node = unsafe { &*current };
+            node.options.get_or_init(|| {
+                let (s1_options, s2_options) = state.get_all_options();
+                NodeOptions::new(&s1_options, &s2_options, MoveNode::from_move_choice)
+            });
+            let s1_index = node.maximize_ucb_for_side(node.options.get().unwrap().s1());
+            let s2_index = node.maximize_ucb_for_side(node.options.get().unwrap().s2());
+            let key = (node as *const Node as usize, s1_index, s2_index);
 
-        let s1_mc_index = self.maximize_ucb_for_side(self.options.get().unwrap().s1());
-        let s2_mc_index = self.maximize_ucb_for_side(self.options.get().unwrap().s2());
-        let key = (self as *const Node as usize, s1_mc_index, s2_mc_index);
-        match children.get_mut(&key) {
-            Some(child_slice) => {
-                let child_slice_ptr = child_slice as *const Box<[Node]>;
-                let chosen_child = self.sample_node(child_slice_ptr);
-                state.apply_instructions(&(*chosen_child).instructions.instruction_list);
-                (*chosen_child).selection(state, children)
+            match children.get_mut(&key) {
+                Some(child_slice) => {
+                    let child_slice_ptr = child_slice as *const Box<[Node]>;
+                    let chosen_child = node.sample_node(child_slice_ptr);
+                    state.apply_instructions(
+                        &(unsafe { &*chosen_child }).instructions.instruction_list,
+                    );
+                    path.push(PathStep {
+                        parent: current,
+                        child: chosen_child,
+                        s1_index,
+                        s2_index,
+                    });
+                    current = chosen_child;
+                }
+                None => break (current, s1_index, s2_index),
             }
-            None => (self as *const Node, s1_mc_index, s2_mc_index),
         }
     }
 
-    unsafe fn sample_node(&self, move_vector: *const Box<[Node]>) -> *const Node {
+    fn sample_node(&self, move_vector: *const Box<[Node]>) -> *const Node {
         let mut rng = rng();
-        let weights: Vec<f64> = (*move_vector)
+        let weights: Vec<f64> = (unsafe { &*move_vector })
             .iter()
             .map(|x| x.instructions.percentage as f64)
             .collect();
         let dist = WeightedIndex::new(weights).unwrap();
-        let chosen_node = &(&*move_vector)[dist.sample(&mut rng)];
+        let chosen_node = &(unsafe { &*move_vector })[dist.sample(&mut rng)];
         let chosen_node_ptr = chosen_node as *const Node;
         chosen_node_ptr
     }
 
-    pub unsafe fn expand(
+    fn expand(
         &self,
         state: &mut State,
         s1_move_index: u8,
         s2_move_index: u8,
         children: &mut ChildMap,
-    ) -> *const Node {
+        depth: usize,
+    ) -> Option<*const Node> {
         let s1_move = &self.options.get().unwrap().s1()[s1_move_index as usize].move_choice;
         let s2_move = &self.options.get().unwrap().s2()[s2_move_index as usize].move_choice;
         // if the battle is over or both moves are none there is no need to expand
-        if (state.battle_is_over() != 0.0 && !self.root)
+        if (state.battle_is_over() != 0.0 && depth != 0)
             || (s1_move == &MoveChoice::None && s2_move == &MoveChoice::None)
         {
-            return self as *const Node;
+            return None;
         }
-        let should_branch_on_damage = self.root || (*self.parent).root;
+        let should_branch_on_damage = depth < MCTS_DAMAGE_BRANCH_DEPTH;
         let new_instructions =
             generate_instructions_from_move_pair(state, s1_move, s2_move, should_branch_on_damage);
         let mut this_pair_slice = new_instructions
             .into_iter()
             .map(|mut state_instructions| {
                 let mut new_node = Node::new();
-                new_node.parent = self;
                 state_instructions.instruction_list.shrink_to_fit();
                 new_node.instructions = state_instructions;
-                new_node.s1_choice = s1_move_index as u8;
-                new_node.s2_choice = s2_move_index as u8;
                 new_node
             })
             .collect::<Box<[Node]>>();
@@ -134,34 +139,32 @@ impl Node {
         // sample a node from the new instruction list.
         // this is the node that the rollout will be done on
         let new_node_ptr = self.sample_node(&mut this_pair_slice);
-        state.apply_instructions(&(*new_node_ptr).instructions.instruction_list);
-
         let key = (self as *const Node as usize, s1_move_index, s2_move_index);
         children.insert(key, this_pair_slice);
-        new_node_ptr
+        Some(new_node_ptr)
     }
 
-    pub unsafe fn backpropagate(&self, score: f32, state: &mut State) {
-        self.times_visited.update(|v| v + 1);
-        if self.root {
-            return;
+    fn backpropagate(path: &[PathStep], leaf: &Node, score: f32, state: &mut State) {
+        leaf.times_visited.update(|v| v + 1);
+        for step in path.iter().rev() {
+            let (parent, child) = unsafe { (&*step.parent, &*step.child) };
+            let options = parent.options.get().expect("path parent has options");
+
+            let parent_s1_movenode = &options.s1()[step.s1_index as usize];
+            parent_s1_movenode.total_score.update(|v| v + score);
+            parent_s1_movenode.visits.update(|v| v + 1);
+
+            let parent_s2_movenode = &options.s2()[step.s2_index as usize];
+            parent_s2_movenode.total_score.update(|v| v + 1.0 - score);
+            parent_s2_movenode.visits.update(|v| v + 1);
+
+            parent.times_visited.update(|v| v + 1);
+
+            state.reverse_instructions(&child.instructions.instruction_list);
         }
-
-        let parent_s1_movenode =
-            &(*self.parent).options.get().unwrap().s1()[self.s1_choice as usize];
-        parent_s1_movenode.total_score.update(|v| v + score);
-        parent_s1_movenode.visits.update(|v| v + 1);
-
-        let parent_s2_movenode =
-            &(*self.parent).options.get().unwrap().s2()[self.s2_choice as usize];
-        parent_s2_movenode.total_score.update(|v| v + 1.0 - score);
-        parent_s2_movenode.visits.update(|v| v + 1);
-
-        state.reverse_instructions(&self.instructions.instruction_list);
-        (*self.parent).backpropagate(score, state);
     }
 
-    pub fn rollout(&self, state: &mut State, root_eval: &f32) -> f32 {
+    fn rollout(state: &mut State, root_eval: &f32) -> f32 {
         let battle_is_over = state.battle_is_over();
         if battle_is_over == 0.0 {
             let eval = evaluate(state);
@@ -174,6 +177,13 @@ impl Node {
             }
         }
     }
+}
+
+struct PathStep {
+    parent: *const Node,
+    child: *const Node,
+    s1_index: u8,
+    s2_index: u8,
 }
 
 #[derive(Debug)]
@@ -233,16 +243,31 @@ fn do_mcts(
     state: &mut State,
     root_eval: &f32,
     children: &mut ChildMap,
+    path: &mut Vec<PathStep>,
     timers: &mut Timers,
 ) {
+    path.clear();
     let t0 = Instant::now();
-    let (mut new_node, s1_move, s2_move) = unsafe { root_node.selection(state, children) };
+    let (leaf, s1_index, s2_index) = Node::selection(root_node, state, children, path);
     let t1 = Instant::now();
-    new_node = unsafe { (*new_node).expand(state, s1_move, s2_move, children) };
+    let expanded = unsafe { &*leaf }.expand(state, s1_index, s2_index, children, path.len());
+    let rollout_target = if let Some(child) = expanded {
+        let child = unsafe { &*child };
+        state.apply_instructions(&child.instructions.instruction_list);
+        path.push(PathStep {
+            parent: leaf,
+            child,
+            s1_index,
+            s2_index,
+        });
+        child
+    } else {
+        leaf
+    };
     let t2 = Instant::now();
-    let rollout_result = unsafe { (*new_node).rollout(state, root_eval) };
+    let rollout_result = Node::rollout(state, root_eval);
     let t3 = Instant::now();
-    unsafe { (*new_node).backpropagate(rollout_result, state) }
+    Node::backpropagate(path, unsafe { &*rollout_target }, rollout_result, state);
     let t4 = Instant::now();
     timers.selection += t1.duration_since(t0).as_nanos() as u64;
     timers.expand += t2.duration_since(t1).as_nanos() as u64;
@@ -272,8 +297,8 @@ pub fn perform_mcts_inner(
         &side_two_options,
         MoveNode::from_move_choice,
     ));
-    root_node.root = true;
     let mut children: ChildMap = ChildMap::new();
+    let mut path = Vec::with_capacity(16);
 
     let root_eval = evaluate(state);
     let start_time = Instant::now();
@@ -284,6 +309,7 @@ pub fn perform_mcts_inner(
                 state,
                 &root_eval,
                 &mut children,
+                &mut path,
                 &mut timers,
             );
         }
