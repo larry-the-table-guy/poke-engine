@@ -4,7 +4,6 @@ use crate::engine::state::MoveChoice;
 use crate::instruction::StateInstructions;
 use crate::perf::Timers;
 use crate::state::State;
-use rand::distr::weighted::WeightedIndex;
 use rand::prelude::*;
 use rand::rng;
 use std::cell::Cell;
@@ -77,11 +76,8 @@ impl Node {
 
             match children.get_mut(&key) {
                 Some(child_slice) => {
-                    let child_slice_ptr = child_slice as *const Box<[Node]>;
-                    let chosen_child = node.sample_node(child_slice_ptr);
-                    state.apply_instructions(
-                        &(unsafe { &*chosen_child }).instructions.instruction_list,
-                    );
+                    let chosen_child = Node::sample_node(child_slice);
+                    state.apply_instructions(&chosen_child.instructions.instruction_list);
                     path.push(PathStep {
                         parent: current,
                         child: chosen_child,
@@ -95,16 +91,16 @@ impl Node {
         }
     }
 
-    fn sample_node(&self, move_vector: *const Box<[Node]>) -> *const Node {
-        let mut rng = rng();
-        let weights: Vec<f64> = (unsafe { &*move_vector })
-            .iter()
-            .map(|x| x.instructions.percentage as f64)
-            .collect();
-        let dist = WeightedIndex::new(weights).unwrap();
-        let chosen_node = &(unsafe { &*move_vector })[dist.sample(&mut rng)];
-        let chosen_node_ptr = chosen_node as *const Node;
-        chosen_node_ptr
+    fn sample_node(moves: &[Node]) -> &Node {
+        let roll = rng().random_range(0f32..100f32);
+        let mut prefix_sum = 0f32;
+        for m in moves {
+            prefix_sum += m.instructions.percentage;
+            if prefix_sum >= roll {
+                return m;
+            }
+        }
+        moves.last().unwrap()
     }
 
     fn expand(
@@ -126,7 +122,7 @@ impl Node {
         let should_branch_on_damage = depth < MCTS_DAMAGE_BRANCH_DEPTH;
         let new_instructions =
             generate_instructions_from_move_pair(state, s1_move, s2_move, should_branch_on_damage);
-        let mut this_pair_slice = new_instructions
+        let this_pair_slice = new_instructions
             .into_iter()
             .map(|mut state_instructions| {
                 let mut new_node = Node::new();
@@ -138,7 +134,7 @@ impl Node {
 
         // sample a node from the new instruction list.
         // this is the node that the rollout will be done on
-        let new_node_ptr = self.sample_node(&mut this_pair_slice);
+        let new_node_ptr = Node::sample_node(&this_pair_slice) as *const Node;
         let key = (self as *const Node as usize, s1_move_index, s2_move_index);
         children.insert(key, this_pair_slice);
         Some(new_node_ptr)

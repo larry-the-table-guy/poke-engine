@@ -22,7 +22,7 @@ const VIRTUAL_LOSS_VISITS: u32 = 3;
 pub type SharedNodeOptions = crate::perf::NodeOptions<MoveNode>;
 
 pub type ChildMapK = (usize, u8, u8);
-pub type ChildMapV = SharedBranch;
+pub type ChildMapV = Arc<[Node]>;
 // Node map type alias for clarity.
 // key: (parent node address, s1_move_index, s2_move_index)
 // value: the branch (weighted list of outcome nodes for that move pair)
@@ -77,25 +77,19 @@ impl MoveNode {
     }
 }
 
-pub struct SharedBranch {
-    pub nodes: Arc<[Node]>,
-    pub total_weight: f32,
-}
-
-impl SharedBranch {
-    fn sample<R: Rng + ?Sized>(&self, rng: &mut R) -> *const Node {
-        if self.nodes.len() <= 1 || self.total_weight <= 0.0 {
-            return &self.nodes[0];
-        }
-        let mut threshold = rng.random_range(0.0..self.total_weight);
-        for node in self.nodes.iter() {
-            threshold -= node.instructions.percentage.max(0.0);
-            if threshold <= 0.0 {
-                return node;
-            }
-        }
-        &self.nodes[self.nodes.len() - 1]
+fn sample_node<'a, R: Rng + ?Sized>(nodes: &'a [Node], rng: &mut R) -> &'a Node {
+    if nodes.len() <= 1 {
+        return &nodes[0];
     }
+    let mut prefix_sum = 0.;
+    let roll = rng.random_range(0f32..100f32);
+    for node in nodes.iter() {
+        prefix_sum += node.instructions.percentage.max(0.0);
+        if prefix_sum >= roll {
+            return node;
+        }
+    }
+    &nodes[nodes.len() - 1]
 }
 
 struct PathStep {
@@ -181,7 +175,7 @@ impl Node {
             let key = (node.as_key(), s1_index, s2_index);
             match children.get(&key) {
                 Some(branch) => {
-                    let child = branch.sample(rng);
+                    let child = sample_node(&branch, rng) as *const Node;
 
                     // drop the DashMap ref before mutating state to avoid
                     // holding the lock any longer than necessary. the sampled
@@ -253,26 +247,19 @@ impl Node {
         let instructions =
             generate_instructions_from_move_pair(state, s1_move, s2_move, should_branch_on_damage);
 
-        let mut total_weight = 0.0f32;
         let nodes = instructions
             .into_iter()
             .map(|mut instr| {
-                total_weight += instr.percentage.max(0.0);
                 instr.instruction_list.shrink_to_fit();
                 Node::new_child(instr)
             })
             .collect::<Arc<[Node]>>();
-        let branch = SharedBranch {
-            nodes,
-            total_weight,
-        };
-
         let key = (self.as_key(), s1_index, s2_index);
         // entry() on DashMap is atomic per-shard: only one thread will
         // construct the branch; all others get the winner's branch.
-        let branch_ref = children.entry(key).or_insert(branch);
+        let nodes_ref = children.entry(key).or_insert(nodes);
 
-        Some(branch_ref.sample(rng))
+        Some(sample_node(&nodes_ref, rng))
     }
 
     fn rollout(&self, state: &State, root_eval: f32) -> f32 {
