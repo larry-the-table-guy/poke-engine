@@ -1,6 +1,6 @@
 //! Structs that track relevant properties of the MCTS search
 
-use poke_engine::Timers;
+use poke_engine::{mcts, mcts_threaded, Timers};
 use std::collections::BTreeMap;
 
 /// How a histogram should be displayed
@@ -129,18 +129,16 @@ impl Stats {
         self.idle_ms.inc(timers.idle / 1_000_000);
     }
 
-    pub fn analyze_tree(&mut self, child_map: &poke_engine::mcts::ChildMap) {
+    pub fn analyze_tree(&mut self, root: &mcts::Node, child_map: &mcts::ChildMap) {
         self.map_len.inc(child_map.len() as u64);
         self.map_cap.inc(child_map.capacity() as u64);
         let mut tmp_node_num_children_hist = Histogram::new();
         for (k, v) in child_map.iter() {
-            let parent =
-                unsafe { &*std::ptr::with_exposed_provenance::<poke_engine::mcts::Node>(k.0) };
             tmp_node_num_children_hist.inc(k.0 as u64);
             self.node_len.inc(v.len() as u64);
             self.node_cap.inc(v.len() as u64);
             for node in v {
-                if let Some(options) = node.options.as_ref() {
+                if let Some(options) = node.options.get() {
                     self.move_node_len.inc(options.s1().len() as u64);
                     self.move_node_cap.inc(options.s1().len() as u64);
                     self.move_node_len.inc(options.s2().len() as u64);
@@ -156,18 +154,6 @@ impl Stats {
                 self.instr_list_len.inc(ins.len() as u64);
                 self.instr_list_cap.inc(ins.capacity() as u64);
 
-                let mut depth = 0;
-                let mut nd = std::ptr::from_ref(parent);
-                assert_eq!(node.root, node.parent.is_null());
-                while !nd.is_null() {
-                    nd = unsafe { (&*nd).parent };
-                    depth += 1;
-                }
-                self.node_depth.inc(depth);
-                if node.options.is_none() {
-                    self.leaf_node_depth.inc(depth);
-                }
-
                 self.node_weight_pct
                     .inc((node.instructions.percentage).floor() as u64);
             }
@@ -175,9 +161,57 @@ impl Stats {
         for count in tmp_node_num_children_hist.0.values() {
             self.node_as_key.inc(*count as u64);
         }
+        drop(tmp_node_num_children_hist);
+
+        // This can be written with an explicit stack, but the depth is just in the 10s.
+        fn visit_children(
+            node: &mcts::Node,
+            child_map: &mcts::ChildMap,
+            node_depth_hist: &mut Histogram,
+            leaf_node_depth_hist: &mut Histogram,
+            depth: usize,
+        ) {
+            node_depth_hist.inc(depth as u64);
+            let Some(options) = node.options.get() else {
+                leaf_node_depth_hist.inc(depth as u64);
+                return;
+            };
+            if options.s1().is_empty() || options.s2().is_empty() {
+                leaf_node_depth_hist.inc(depth as u64);
+                return;
+            }
+            for s1 in 0..options.s1().len() {
+                for s2 in 0..options.s2().len() {
+                    if let Some(entry) =
+                        child_map.get(&(node as *const mcts::Node as usize, s1 as u8, s2 as u8))
+                    {
+                        for child in entry.iter() {
+                            visit_children(
+                                child,
+                                child_map,
+                                node_depth_hist,
+                                leaf_node_depth_hist,
+                                depth + 1,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        visit_children(
+            root,
+            child_map,
+            &mut self.node_depth,
+            &mut self.leaf_node_depth,
+            0,
+        );
     }
 
-    pub fn analyze_threaded_tree(&mut self, child_map: &poke_engine::mcts_threaded::ChildMap) {
+    pub fn analyze_threaded_tree(
+        &mut self,
+        root: &mcts_threaded::Node,
+        child_map: &mcts_threaded::ChildMap,
+    ) {
         self.map_len.inc(child_map.len() as u64);
         self.map_cap.inc(child_map.capacity() as u64);
         let mut tmp_node_num_children_hist = Histogram::new();
@@ -204,11 +238,6 @@ impl Stats {
                 self.instr_list_len.inc(ins.len() as u64);
                 self.instr_list_cap.inc(ins.capacity() as u64);
 
-                self.node_depth.inc(node.depth as u64);
-                if node.options.get().is_none_or(|s| s.s1().is_empty()) {
-                    self.leaf_node_depth.inc(node.depth as u64);
-                }
-
                 self.node_weight_pct
                     .inc((node.instructions.percentage).floor() as u64);
             }
@@ -216,6 +245,52 @@ impl Stats {
         for count in tmp_node_num_children_hist.0.values() {
             self.node_as_key.inc(*count as u64);
         }
+        drop(tmp_node_num_children_hist);
+
+        // This can be written with an explicit stack, but the depth is just in the 10s.
+        fn visit_children(
+            node: &mcts_threaded::Node,
+            child_map: &mcts_threaded::ChildMap,
+            node_depth_hist: &mut Histogram,
+            leaf_node_depth_hist: &mut Histogram,
+            depth: usize,
+        ) {
+            node_depth_hist.inc(depth as u64);
+            let Some(options) = node.options.get() else {
+                leaf_node_depth_hist.inc(depth as u64);
+                return;
+            };
+            if options.s1().is_empty() || options.s2().is_empty() {
+                leaf_node_depth_hist.inc(depth as u64);
+                return;
+            }
+            for s1 in 0..options.s1().len() {
+                for s2 in 0..options.s2().len() {
+                    if let Some(entry) = child_map.get(&(
+                        node as *const mcts_threaded::Node as usize,
+                        s1 as u8,
+                        s2 as u8,
+                    )) {
+                        for child in entry.nodes.iter() {
+                            visit_children(
+                                child,
+                                child_map,
+                                node_depth_hist,
+                                leaf_node_depth_hist,
+                                depth + 1,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        visit_children(
+            root,
+            child_map,
+            &mut self.node_depth,
+            &mut self.leaf_node_depth,
+            0,
+        );
     }
 }
 

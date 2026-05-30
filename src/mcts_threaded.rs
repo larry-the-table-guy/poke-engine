@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 
 const MCTS_DEADLINE_CHECK_INTERVAL: u32 = 1_000;
 const MCTS_MAX_ITERATIONS_PER_TREE: u32 = 10_000_000;
-const MCTS_DAMAGE_BRANCH_DEPTH: u8 = 2;
+const MCTS_DAMAGE_BRANCH_DEPTH: usize = 2;
 const SCORE_SCALE: f32 = 400.0;
 const VIRTUAL_LOSS_VISITS: u32 = 3;
 
@@ -106,9 +106,7 @@ struct PathStep {
 }
 
 pub struct Node {
-    pub root: bool,
     pub instructions: StateInstructions,
-    pub depth: u8,
     pub times_visited: AtomicU32,
     virtual_losses: AtomicI8,
     pub options: OnceLock<SharedNodeOptions>,
@@ -117,9 +115,7 @@ pub struct Node {
 impl Node {
     fn new_root(s1_options: Vec<MoveChoice>, s2_options: Vec<MoveChoice>) -> Arc<Self> {
         let node = Arc::new(Self {
-            root: true,
             instructions: StateInstructions::default(),
-            depth: 0,
             times_visited: AtomicU32::new(0),
             virtual_losses: AtomicI8::new(0),
             options: OnceLock::new(),
@@ -132,11 +128,9 @@ impl Node {
         node
     }
 
-    fn new_child(instructions: StateInstructions, depth: u8) -> Self {
+    fn new_child(instructions: StateInstructions) -> Self {
         Self {
-            root: false,
             instructions,
-            depth,
             times_visited: AtomicU32::new(0),
             virtual_losses: AtomicI8::new(0),
             options: OnceLock::new(),
@@ -240,6 +234,7 @@ impl Node {
         s2_index: u8,
         rng: &mut R,
         children: &ChildMap,
+        depth: usize,
     ) -> Option<*const Node> {
         let options = self
             .options
@@ -248,13 +243,13 @@ impl Node {
         let s1_move = &options.s1()[s1_index as usize].move_choice;
         let s2_move = &options.s2()[s2_index as usize].move_choice;
 
-        if (state.battle_is_over() != 0.0 && !self.root)
+        if (state.battle_is_over() != 0.0 && depth != 0)
             || (s1_move == &MoveChoice::None && s2_move == &MoveChoice::None)
         {
             return None;
         }
 
-        let should_branch_on_damage = self.depth < MCTS_DAMAGE_BRANCH_DEPTH;
+        let should_branch_on_damage = depth < MCTS_DAMAGE_BRANCH_DEPTH;
         let instructions =
             generate_instructions_from_move_pair(state, s1_move, s2_move, should_branch_on_damage);
 
@@ -264,7 +259,7 @@ impl Node {
             .map(|mut instr| {
                 total_weight += instr.percentage.max(0.0);
                 instr.instruction_list.shrink_to_fit();
-                Node::new_child(instr, self.depth.saturating_add(1))
+                Node::new_child(instr)
             })
             .collect::<Arc<[Node]>>();
         let branch = SharedBranch {
@@ -330,7 +325,7 @@ fn do_mcts<R: Rng + ?Sized>(
     let options = leaf.options.get().expect("options set during selection");
     options.s1()[s1_index as usize].add_virtual_loss();
     options.s2()[s2_index as usize].add_virtual_loss();
-    let expanded = leaf.expand(state, s1_index, s2_index, rng, children);
+    let expanded = leaf.expand(state, s1_index, s2_index, rng, children, path.len());
     let expand_end = Instant::now();
     let rollout_target = match expanded {
         Some(child) => {
