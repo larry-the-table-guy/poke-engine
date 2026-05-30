@@ -26,7 +26,7 @@ pub type ChildMapV = Box<[Node]>;
 // Node map type alias for clarity.
 // key: (parent node address, s1_move_index, s2_move_index)
 // value: the branch (weighted list of outcome nodes for that move pair)
-pub type ChildMap = DashMap<ChildMapK, ChildMapV>;
+pub type ChildMap = DashMap<ChildMapK, ChildMapV, foldhash::fast::RandomState>;
 
 fn sigmoid(x: f32) -> f32 {
     // Tuned so that ~200 points is very close to 1.0
@@ -378,7 +378,8 @@ pub fn perform_mcts_shared_tree_inner(
     let started_iterations = AtomicU32::new(0);
 
     // global map shared by all threads.
-    let children: ChildMap = DashMap::with_capacity(1 << 16);
+    let children: ChildMap =
+        DashMap::with_capacity_and_hasher(1 << 16, foldhash::fast::RandomState::default());
 
     thread::scope(|scope| {
         for (timer, end_instant) in timers.iter_mut() {
