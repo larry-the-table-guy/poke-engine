@@ -9,7 +9,7 @@ use dashmap::DashMap;
 use rand::prelude::*;
 use rand::rng;
 use std::sync::atomic::{AtomicI8, AtomicU32, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::OnceLock;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -22,7 +22,7 @@ const VIRTUAL_LOSS_VISITS: u32 = 3;
 pub type SharedNodeOptions = crate::perf::NodeOptions<MoveNode>;
 
 pub type ChildMapK = (usize, u8, u8);
-pub type ChildMapV = Arc<[Node]>;
+pub type ChildMapV = Box<[Node]>;
 // Node map type alias for clarity.
 // key: (parent node address, s1_move_index, s2_move_index)
 // value: the branch (weighted list of outcome nodes for that move pair)
@@ -107,19 +107,17 @@ pub struct Node {
 }
 
 impl Node {
-    fn new_root(s1_options: Vec<MoveChoice>, s2_options: Vec<MoveChoice>) -> Arc<Self> {
-        let node = Arc::new(Self {
+    fn new_root(s1_options: Vec<MoveChoice>, s2_options: Vec<MoveChoice>) -> Self {
+        Self {
             instructions: StateInstructions::default(),
             times_visited: AtomicU32::new(0),
             virtual_losses: AtomicI8::new(0),
-            options: OnceLock::new(),
-        });
-        let _ = node.options.set(SharedNodeOptions::new(
-            &s1_options,
-            &s2_options,
-            MoveNode::new,
-        ));
-        node
+            options: OnceLock::from(SharedNodeOptions::new(
+                &s1_options,
+                &s2_options,
+                MoveNode::new,
+            )),
+        }
     }
 
     fn new_child(instructions: StateInstructions) -> Self {
@@ -156,7 +154,7 @@ impl Node {
     }
 
     fn selection<R: Rng + ?Sized>(
-        root: &Arc<Node>,
+        root: &Node,
         state: &mut State,
         rng: &mut R,
         children: &ChildMap,
@@ -166,7 +164,7 @@ impl Node {
         // (Nodes living inside a branch's Arc<[Node]>) uniformly. every node is
         // owned by children/root for the whole search, so the pointers stay
         // valid
-        let mut current: *const Node = Arc::as_ptr(root);
+        let mut current: *const Node = root as *const Node;
         loop {
             let node = unsafe { &*current };
             let (s1_index, s2_index) = node.select_move_pair(state);
@@ -253,7 +251,7 @@ impl Node {
                 instr.instruction_list.shrink_to_fit();
                 Node::new_child(instr)
             })
-            .collect::<Arc<[Node]>>();
+            .collect::<Box<[Node]>>();
         let key = (self.as_key(), s1_index, s2_index);
         // entry() on DashMap is atomic per-shard: only one thread will
         // construct the branch; all others get the winner's branch.
@@ -294,7 +292,7 @@ impl Node {
 }
 
 fn do_mcts<R: Rng + ?Sized>(
-    root: &Arc<Node>,
+    root: &Node,
     state: &mut State,
     root_eval: f32,
     rng: &mut R,
@@ -372,50 +370,44 @@ pub fn perform_mcts_shared_tree_inner(
     side_two_options: Vec<MoveChoice>,
     max_time: Duration,
     worker_count: usize,
-) -> (MctsResult, Arc<Node>, Timers, ChildMap) {
+) -> (MctsResult, Box<Node>, Timers, ChildMap) {
     let mut timers = vec![(Timers::default(), Instant::now()); worker_count];
     let root_eval = evaluate(state);
     let deadline = Instant::now() + max_time;
-    let root = Node::new_root(side_one_options, side_two_options);
-    let started_iterations = Arc::new(AtomicU32::new(0));
+    let root = Box::new(Node::new_root(side_one_options, side_two_options));
+    let started_iterations = AtomicU32::new(0);
 
     // global map shared by all threads.
-    let children: Arc<ChildMap> = Arc::new(DashMap::with_capacity(1 << 16));
+    let children: ChildMap = DashMap::with_capacity(1 << 16);
 
     thread::scope(|scope| {
         for (timer, end_instant) in timers.iter_mut() {
-            let root = root.clone();
-            let started_iterations = started_iterations.clone();
-            let children = children.clone();
+            let root = &root;
+            let children = &children;
+            let started_iterations = &started_iterations;
             let mut worker_state = state.clone();
             scope.spawn(move || {
                 let mut rng = rng();
-                let mut iterations_until_deadline_check = 0u32;
                 let mut path = Vec::with_capacity(16);
 
-                loop {
-                    if iterations_until_deadline_check == 0 {
-                        if Instant::now() >= deadline {
+                while Instant::now() < deadline {
+                    for _ in 0..MCTS_DEADLINE_CHECK_INTERVAL {
+                        do_mcts(
+                            &root,
+                            &mut worker_state,
+                            root_eval,
+                            &mut rng,
+                            &children,
+                            &mut path,
+                            timer,
+                        );
+                        if started_iterations
+                            .fetch_add(MCTS_DEADLINE_CHECK_INTERVAL, Ordering::AcqRel)
+                            >= MCTS_MAX_ITERATIONS_PER_TREE
+                        {
                             break;
                         }
-                        iterations_until_deadline_check = MCTS_DEADLINE_CHECK_INTERVAL;
                     }
-                    if started_iterations.fetch_add(1, Ordering::AcqRel)
-                        >= MCTS_MAX_ITERATIONS_PER_TREE
-                    {
-                        break;
-                    }
-
-                    do_mcts(
-                        &root,
-                        &mut worker_state,
-                        root_eval,
-                        &mut rng,
-                        &children,
-                        &mut path,
-                        timer,
-                    );
-                    iterations_until_deadline_check -= 1;
                 }
                 *end_instant = std::time::Instant::now();
             });
@@ -452,5 +444,5 @@ pub fn perform_mcts_shared_tree_inner(
             .collect(),
         iteration_count: root.times_visited.load(Ordering::Acquire),
     };
-    (result, root, timers, Arc::into_inner(children).unwrap())
+    (result, root, timers, children)
 }
