@@ -217,7 +217,6 @@ impl Stats {
         let mut tmp_node_num_children_hist = Histogram::new();
         for r in child_map.iter() {
             let (k, v) = r.pair();
-            let v = &v.nodes;
             tmp_node_num_children_hist.inc(k.0 as u64);
             self.node_len.inc(v.len() as u64);
             self.node_cap.inc(v.len() as u64);
@@ -271,7 +270,7 @@ impl Stats {
                         s1 as u8,
                         s2 as u8,
                     )) {
-                        for child in entry.nodes.iter() {
+                        for child in entry.iter() {
                             visit_children(
                                 child,
                                 child_map,
