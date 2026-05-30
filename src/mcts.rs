@@ -4,11 +4,11 @@ use crate::engine::state::MoveChoice;
 use crate::instruction::StateInstructions;
 use crate::perf::Timers;
 use crate::state::State;
+use foldhash::{HashMap, HashMapExt};
 use rand::prelude::*;
 use rand::rng;
 use std::cell::Cell;
 use std::cell::OnceCell;
-use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 fn sigmoid(x: f32) -> f32 {
