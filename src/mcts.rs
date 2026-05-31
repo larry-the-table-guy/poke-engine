@@ -2,8 +2,7 @@ use crate::engine::evaluate::evaluate;
 use crate::engine::generate_instructions::generate_instructions_from_move_pair;
 use crate::engine::state::MoveChoice;
 use crate::instruction::Instruction;
-use crate::instruction::StateInstructions;
-use crate::perf::Timers;
+use crate::perf::{arena::Arena, Timers};
 use crate::state::State;
 use foldhash::{HashMap, HashMapExt};
 use rand::{prelude::*, rng, rngs::SmallRng as Rng, Rng as _};
@@ -17,31 +16,31 @@ fn sigmoid(x: f32) -> f32 {
 
 const MCTS_DAMAGE_BRANCH_DEPTH: usize = 2;
 
-pub type NodeOptions = crate::perf::NodeOptions<MoveNode>;
+pub type NodeOptions<'arena> = crate::perf::NodeOptions<'arena, MoveNode>;
 
 pub type ChildMapK = (usize, u8, u8);
-pub type ChildMapV = Box<[Node]>;
-pub type ChildMap = HashMap<ChildMapK, ChildMapV>;
+pub type ChildMapV<'arena> = &'arena [Node<'arena>];
+pub type ChildMap<'arena> = HashMap<ChildMapK, ChildMapV<'arena>>;
 
 #[derive(Debug)]
-pub struct Node {
+pub struct Node<'arena> {
     pub times_visited: Cell<u32>,
 
     /// How likely this node was as a result of the parent.
     pub percentage: f32,
     // represents the instructions that led to this node from the parent
-    pub instruction_list: Box<[Instruction]>,
+    pub instruction_list: &'arena [Instruction],
 
     /// represents the total score and number of visits for this node
-    pub options: OnceCell<NodeOptions>,
+    pub options: OnceCell<NodeOptions<'arena>>,
 }
 
-impl Node {
-    fn new(instructions: StateInstructions) -> Node {
+impl<'arena> Node<'arena> {
+    fn new(percentage: f32, instruction_list: &'arena [Instruction]) -> Node<'arena> {
         Node {
             times_visited: Cell::new(0),
-            instruction_list: instructions.instruction_list.into_boxed_slice(),
-            percentage: instructions.percentage,
+            instruction_list,
+            percentage,
             options: OnceCell::new(),
         }
     }
@@ -60,22 +59,22 @@ impl Node {
     }
 
     fn selection(
-        root: &Node,
+        root: &'arena Node<'arena>,
         state: &mut State,
-        children: &mut ChildMap,
-        path: &mut Vec<PathStep>,
+        children: &mut ChildMap<'arena>,
+        path: &mut Vec<PathStep<'arena>>,
         rng: &mut Rng,
-    ) -> (*const Node, u8, u8) {
-        let mut current: *const Node = root;
+        arena: &mut Arena<'arena>,
+    ) -> (&'arena Node<'arena>, u8, u8) {
+        let mut current: &Node = root;
         loop {
-            let node = unsafe { &*current };
-            node.options.get_or_init(|| {
+            current.options.get_or_init(|| {
                 let (s1_options, s2_options) = state.get_all_options();
-                NodeOptions::new(&s1_options, &s2_options, MoveNode::from_move_choice)
+                NodeOptions::new_in(arena, &s1_options, &s2_options, MoveNode::from_move_choice)
             });
-            let s1_index = node.maximize_ucb_for_side(node.options.get().unwrap().s1());
-            let s2_index = node.maximize_ucb_for_side(node.options.get().unwrap().s2());
-            let key = (node as *const Node as usize, s1_index, s2_index);
+            let s1_index = current.maximize_ucb_for_side(current.options.get().unwrap().s1());
+            let s2_index = current.maximize_ucb_for_side(current.options.get().unwrap().s2());
+            let key = (current as *const Node as usize, s1_index, s2_index);
 
             match children.get_mut(&key) {
                 Some(child_slice) => {
@@ -94,7 +93,7 @@ impl Node {
         }
     }
 
-    fn sample_node<'a>(rng: &mut Rng, nodes: &'a [Node]) -> &'a Node {
+    fn sample_node(rng: &mut Rng, nodes: &'arena [Node<'arena>]) -> &'arena Node<'arena> {
         if nodes.len() == 1 {
             return &nodes[0];
         }
@@ -114,10 +113,11 @@ impl Node {
         state: &mut State,
         s1_move_index: u8,
         s2_move_index: u8,
-        children: &mut ChildMap,
+        children: &mut ChildMap<'arena>,
         depth: usize,
         rng: &mut Rng,
-    ) -> Option<*const Node> {
+        arena: &mut Arena<'arena>,
+    ) -> Option<&'arena Node<'arena>> {
         let s1_move = &self.options.get().unwrap().s1()[s1_move_index as usize].move_choice;
         let s2_move = &self.options.get().unwrap().s2()[s2_move_index as usize].move_choice;
         // if the battle is over or both moves are none there is no need to expand
@@ -131,14 +131,21 @@ impl Node {
             generate_instructions_from_move_pair(state, s1_move, s2_move, should_branch_on_damage);
         // put the most likely branches first
         new_instructions.sort_unstable_by(|l, r| l.percentage.total_cmp(&r.percentage).reverse());
-        let this_pair_slice = new_instructions
+        let collect = new_instructions
             .into_iter()
-            .map(|state_instructions| Node::new(state_instructions))
-            .collect::<Box<[Node]>>();
-
+            .map(|si| {
+                (
+                    si.percentage,
+                    arena.alloc_slice(si.instruction_list.into_iter()),
+                )
+            })
+            .collect::<Vec<_>>() // TODO: remove when Node becomes DST
+            ;
+        let this_pair_slice =
+            arena.alloc_slice(collect.into_iter().map(|si| Node::new(si.0, si.1)));
         // sample a node from the new instruction list.
         // this is the node that the rollout will be done on
-        let new_node_ptr = Node::sample_node(rng, &this_pair_slice) as *const Node;
+        let new_node_ptr = Node::sample_node(rng, this_pair_slice);
         let key = (self as *const Node as usize, s1_move_index, s2_move_index);
         children.insert(key, this_pair_slice);
         Some(new_node_ptr)
@@ -147,7 +154,7 @@ impl Node {
     fn backpropagate(path: &[PathStep], leaf: &Node, score: f32, state: &mut State) {
         leaf.times_visited.update(|v| v + 1);
         for step in path.iter().rev() {
-            let (parent, child) = unsafe { (&*step.parent, &*step.child) };
+            let (parent, child) = (step.parent, step.child);
             let options = parent.options.get().expect("path parent has options");
 
             let parent_s1_movenode = &options.s1()[step.s1_index as usize];
@@ -179,9 +186,9 @@ impl Node {
     }
 }
 
-struct PathStep {
-    parent: *const Node,
-    child: *const Node,
+struct PathStep<'a> {
+    parent: &'a Node<'a>,
+    child: &'a Node<'a>,
     s1_index: u8,
     s2_index: u8,
 }
@@ -238,22 +245,22 @@ pub struct MctsResult {
     pub iteration_count: u32,
 }
 
-fn do_mcts(
-    root_node: &Node,
+fn do_mcts<'arena>(
+    root_node: &'arena Node<'arena>,
     state: &mut State,
     root_eval: &f32,
-    children: &mut ChildMap,
-    path: &mut Vec<PathStep>,
+    children: &mut ChildMap<'arena>,
+    path: &mut Vec<PathStep<'arena>>,
     timers: &mut Timers,
     rng: &mut Rng,
+    arena: &mut Arena<'arena>,
 ) {
     path.clear();
     let t0 = Instant::now();
-    let (leaf, s1_index, s2_index) = Node::selection(root_node, state, children, path, rng);
+    let (leaf, s1_index, s2_index) = Node::selection(root_node, state, children, path, rng, arena);
     let t1 = Instant::now();
-    let expanded = unsafe { &*leaf }.expand(state, s1_index, s2_index, children, path.len(), rng);
+    let expanded = leaf.expand(state, s1_index, s2_index, children, path.len(), rng, arena);
     let rollout_target = if let Some(child) = expanded {
-        let child = unsafe { &*child };
         state.apply_instructions(&child.instruction_list);
         path.push(PathStep {
             parent: leaf,
@@ -268,7 +275,7 @@ fn do_mcts(
     let t2 = Instant::now();
     let rollout_result = Node::rollout(state, root_eval);
     let t3 = Instant::now();
-    Node::backpropagate(path, unsafe { &*rollout_target }, rollout_result, state);
+    Node::backpropagate(path, rollout_target, rollout_result, state);
     let t4 = Instant::now();
     timers.selection += t1.duration_since(t0).as_nanos() as u64;
     timers.expand += t2.duration_since(t1).as_nanos() as u64;
@@ -282,18 +289,28 @@ pub fn perform_mcts(
     side_two_options: Vec<MoveChoice>,
     max_time: Duration,
 ) -> MctsResult {
-    perform_mcts_inner(state, side_one_options, side_two_options, max_time).0
+    let a = crate::perf::arena::ConcurrentArena::new();
+    perform_mcts_inner(
+        state,
+        side_one_options,
+        side_two_options,
+        max_time,
+        &mut a.handle(),
+    )
+    .0
 }
 
-pub fn perform_mcts_inner(
+pub fn perform_mcts_inner<'a>(
     state: &mut State,
     side_one_options: Vec<MoveChoice>,
     side_two_options: Vec<MoveChoice>,
     max_time: Duration,
-) -> (MctsResult, Box<Node>, Timers, ChildMap) {
+    arena: &mut Arena<'a>,
+) -> (MctsResult, &'a Node<'a>, Timers, ChildMap<'a>) {
     let mut timers = Timers::default();
-    let mut root_node = Box::new(Node::new(StateInstructions::default()));
-    root_node.options = OnceCell::from(NodeOptions::new(
+    let root_node = arena.alloc(Node::new(100., &[]));
+    root_node.options = OnceCell::from(NodeOptions::new_in(
+        arena,
         &side_one_options,
         &side_two_options,
         MoveNode::from_move_choice,
@@ -307,13 +324,14 @@ pub fn perform_mcts_inner(
     while start_time.elapsed() < max_time {
         for _ in 0..1000 {
             do_mcts(
-                &mut root_node,
+                root_node,
                 state,
                 &root_eval,
                 &mut children,
                 &mut path,
                 &mut timers,
                 &mut rng,
+                arena,
             );
         }
 

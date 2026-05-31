@@ -3,8 +3,8 @@ use core::num::NonZeroU32;
 use core::time::Duration;
 use std::io::{stdout, IsTerminal, Read, Write};
 
-use poke_engine::instruction;
 use poke_engine::state::State;
+use poke_engine::{arena, instruction};
 use poke_engine::{mcts, mcts_threaded};
 
 use foldhash::quality as fhash;
@@ -114,6 +114,7 @@ fn main() {
 }
 
 fn bench_mcts(num_threads: Option<NonZeroU32>, max_time: Duration, skip_stats: bool) {
+    let mut arena = arena::ConcurrentArena::new();
     let mut stats = Stats::new();
     let mut at_least_one = false;
 
@@ -136,6 +137,7 @@ fn bench_mcts(num_threads: Option<NonZeroU32>, max_time: Duration, skip_stats: b
                 s2_options,
                 max_time,
                 num_threads.get() as usize,
+                &arena,
             );
             let time_ms = start.elapsed().as_millis() as u64;
             if !skip_stats {
@@ -144,8 +146,13 @@ fn bench_mcts(num_threads: Option<NonZeroU32>, max_time: Duration, skip_stats: b
             }
             (r.iteration_count, time_ms, timers)
         } else {
-            let (r, root, timers, childmap) =
-                mcts::perform_mcts_inner(&mut state, s1_options, s2_options, max_time);
+            let (r, root, timers, childmap) = mcts::perform_mcts_inner(
+                &mut state,
+                s1_options,
+                s2_options,
+                max_time,
+                &mut arena.handle(),
+            );
             let time_ms = start.elapsed().as_millis() as u64;
             if !skip_stats {
                 proc_mem_usage = memory_stats::memory_stats();
@@ -162,6 +169,7 @@ fn bench_mcts(num_threads: Option<NonZeroU32>, max_time: Duration, skip_stats: b
         stats.iter_count.inc(iter_count as u64);
         stats.total_ms.inc(time_ms);
         stats.analyze_time(sub_timers);
+        arena.reset();
     }
 
     if !at_least_one || skip_stats {

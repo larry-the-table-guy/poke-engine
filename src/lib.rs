@@ -21,7 +21,7 @@ pub mod io;
 pub mod mcts;
 pub mod mcts_threaded;
 mod perf;
-pub use perf::Timers;
+pub use perf::{arena, Timers};
 pub mod pokemon;
 pub mod search;
 pub mod state;
