@@ -150,12 +150,11 @@ impl Stats {
                     self.move_node_cap.add(0, 2);
                     self.options_product.inc(0);
                 }
-                let ins = &node.instructions.instruction_list;
+                let ins = &node.instruction_list;
                 self.instr_list_len.inc(ins.len() as u64);
-                self.instr_list_cap.inc(ins.capacity() as u64);
+                self.instr_list_cap.inc(ins.len() as u64);
 
-                self.node_weight_pct
-                    .inc((node.instructions.percentage).floor() as u64);
+                self.node_weight_pct.inc((node.percentage).floor() as u64);
             }
         }
         for count in tmp_node_num_children_hist.0.values() {
@@ -233,12 +232,11 @@ impl Stats {
                     self.move_node_cap.add(0, 2);
                     self.options_product.inc(0);
                 }
-                let ins = &node.instructions.instruction_list;
+                let ins = &node.instruction_list;
                 self.instr_list_len.inc(ins.len() as u64);
-                self.instr_list_cap.inc(ins.capacity() as u64);
+                self.instr_list_cap.inc(ins.len() as u64);
 
-                self.node_weight_pct
-                    .inc((node.instructions.percentage).floor() as u64);
+                self.node_weight_pct.inc((node.percentage).floor() as u64);
             }
         }
         for count in tmp_node_num_children_hist.0.values() {

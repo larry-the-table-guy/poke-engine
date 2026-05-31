@@ -1715,7 +1715,7 @@ impl State {
         }
     }
 
-    pub fn apply_instructions(&mut self, instructions: &Vec<Instruction>) {
+    pub fn apply_instructions(&mut self, instructions: &[Instruction]) {
         for i in instructions {
             self.apply_one_instruction(i)
         }
@@ -1902,7 +1902,7 @@ impl State {
         }
     }
 
-    pub fn reverse_instructions(&mut self, instructions: &Vec<Instruction>) {
+    pub fn reverse_instructions(&mut self, instructions: &[Instruction]) {
         for i in instructions.iter().rev() {
             self.reverse_one_instruction(i);
         }

@@ -1,13 +1,13 @@
 use crate::engine::evaluate::evaluate;
 use crate::engine::generate_instructions::generate_instructions_from_move_pair;
 use crate::engine::state::MoveChoice;
-use crate::instruction::StateInstructions;
+use crate::instruction::{Instruction, StateInstructions};
 use crate::mcts::{MctsResult, MctsSideResult};
 use crate::perf::Timers;
 use crate::state::State;
 use dashmap::DashMap;
 use rand::prelude::*;
-use rand::rng;
+use rand::{rng, rngs::SmallRng as Rng, Rng as _};
 use std::sync::atomic::{AtomicI8, AtomicU32, Ordering};
 use std::sync::OnceLock;
 use std::thread;
@@ -77,14 +77,14 @@ impl MoveNode {
     }
 }
 
-fn sample_node<'a, R: Rng + ?Sized>(nodes: &'a [Node], rng: &mut R) -> &'a Node {
+fn sample_node<'a>(nodes: &'a [Node], rng: &mut Rng) -> &'a Node {
     if nodes.len() <= 1 {
         return &nodes[0];
     }
     let mut prefix_sum = 0.;
     let roll = rng.random_range(0f32..100f32);
     for node in nodes.iter() {
-        prefix_sum += node.instructions.percentage.max(0.0);
+        prefix_sum += node.percentage.max(0.0);
         if prefix_sum >= roll {
             return node;
         }
@@ -100,8 +100,9 @@ struct PathStep {
 }
 
 pub struct Node {
-    pub instructions: StateInstructions,
     pub times_visited: AtomicU32,
+    pub percentage: f32,
+    pub instruction_list: Box<[Instruction]>,
     virtual_losses: AtomicI8,
     pub options: OnceLock<SharedNodeOptions>,
 }
@@ -109,8 +110,9 @@ pub struct Node {
 impl Node {
     fn new_root(s1_options: Vec<MoveChoice>, s2_options: Vec<MoveChoice>) -> Self {
         Self {
-            instructions: StateInstructions::default(),
             times_visited: AtomicU32::new(0),
+            percentage: 100.,
+            instruction_list: Box::default(),
             virtual_losses: AtomicI8::new(0),
             options: OnceLock::from(SharedNodeOptions::new(
                 &s1_options,
@@ -122,8 +124,9 @@ impl Node {
 
     fn new_child(instructions: StateInstructions) -> Self {
         Self {
-            instructions,
             times_visited: AtomicU32::new(0),
+            percentage: instructions.percentage,
+            instruction_list: instructions.instruction_list.into_boxed_slice(),
             virtual_losses: AtomicI8::new(0),
             options: OnceLock::new(),
         }
@@ -153,10 +156,10 @@ impl Node {
         )
     }
 
-    fn selection<R: Rng + ?Sized>(
+    fn selection(
         root: &Node,
         state: &mut State,
-        rng: &mut R,
+        rng: &mut Rng,
         children: &ChildMap,
         path: &mut Vec<PathStep>,
     ) -> (*const Node, u8, u8) {
@@ -186,7 +189,7 @@ impl Node {
                     options.s1()[s1_index as usize].add_virtual_loss();
                     options.s2()[s2_index as usize].add_virtual_loss();
                     child_ref.virtual_losses.fetch_add(1, Ordering::AcqRel);
-                    state.apply_instructions(&child_ref.instructions.instruction_list);
+                    state.apply_instructions(&child_ref.instruction_list);
                     path.push(PathStep {
                         parent: current,
                         child,
@@ -219,12 +222,12 @@ impl Node {
     /// looks up or creates the child branch for `(s1_index, s2_index)` and
     /// returns one sampled child, applying virtual loss bookkeeping.  Returns
     /// `None` when the node should not be expanded (battle over, both-None).
-    fn expand<R: Rng + ?Sized>(
+    fn expand(
         &self,
         state: &mut State,
         s1_index: u8,
         s2_index: u8,
-        rng: &mut R,
+        rng: &mut Rng,
         children: &ChildMap,
         depth: usize,
     ) -> Option<*const Node> {
@@ -242,15 +245,14 @@ impl Node {
         }
 
         let should_branch_on_damage = depth < MCTS_DAMAGE_BRANCH_DEPTH;
-        let instructions =
+        let mut instructions =
             generate_instructions_from_move_pair(state, s1_move, s2_move, should_branch_on_damage);
+        // put the most likely branches first
+        instructions.sort_unstable_by(|l, r| l.percentage.total_cmp(&r.percentage).reverse());
 
         let nodes = instructions
             .into_iter()
-            .map(|mut instr| {
-                instr.instruction_list.shrink_to_fit();
-                Node::new_child(instr)
-            })
+            .map(|instr| Node::new_child(instr))
             .collect::<Box<[Node]>>();
         let key = (self.as_key(), s1_index, s2_index);
         // entry() on DashMap is atomic per-shard: only one thread will
@@ -286,16 +288,16 @@ impl Node {
             options.s2()[step.s2_index as usize].remove_virtual_loss();
             parent.times_visited.fetch_add(1, Ordering::AcqRel);
             child.virtual_losses.fetch_sub(1, Ordering::AcqRel);
-            state.reverse_instructions(&child.instructions.instruction_list);
+            state.reverse_instructions(&child.instruction_list);
         }
     }
 }
 
-fn do_mcts<R: Rng + ?Sized>(
+fn do_mcts(
     root: &Node,
     state: &mut State,
     root_eval: f32,
-    rng: &mut R,
+    rng: &mut Rng,
     children: &ChildMap,
     path: &mut Vec<PathStep>,
     timers: &mut Timers,
@@ -316,7 +318,7 @@ fn do_mcts<R: Rng + ?Sized>(
         Some(child) => {
             let child = unsafe { &*child };
             child.virtual_losses.fetch_add(1, Ordering::AcqRel);
-            state.apply_instructions(&child.instructions.instruction_list);
+            state.apply_instructions(&child.instruction_list);
             path.push(PathStep {
                 parent: leaf,
                 child,
@@ -388,7 +390,7 @@ pub fn perform_mcts_shared_tree_inner(
             let started_iterations = &started_iterations;
             let mut worker_state = state.clone();
             scope.spawn(move || {
-                let mut rng = rng();
+                let mut rng = rand::rngs::SmallRng::from_rng(&mut rng());
                 let mut path = Vec::with_capacity(16);
 
                 while Instant::now() < deadline {
