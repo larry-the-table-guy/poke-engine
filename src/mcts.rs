@@ -6,10 +6,8 @@ use crate::instruction::StateInstructions;
 use crate::perf::Timers;
 use crate::state::State;
 use foldhash::{HashMap, HashMapExt};
-use rand::prelude::*;
-use rand::rng;
-use std::cell::Cell;
-use std::cell::OnceCell;
+use rand::{prelude::*, rng, rngs::SmallRng as Rng, Rng as _};
+use std::cell::{Cell, OnceCell};
 use std::time::{Duration, Instant};
 
 fn sigmoid(x: f32) -> f32 {
@@ -66,6 +64,7 @@ impl Node {
         state: &mut State,
         children: &mut ChildMap,
         path: &mut Vec<PathStep>,
+        rng: &mut Rng,
     ) -> (*const Node, u8, u8) {
         let mut current: *const Node = root;
         loop {
@@ -80,7 +79,7 @@ impl Node {
 
             match children.get_mut(&key) {
                 Some(child_slice) => {
-                    let chosen_child = Node::sample_node(child_slice);
+                    let chosen_child = Node::sample_node(rng, child_slice);
                     state.apply_instructions(&chosen_child.instruction_list);
                     path.push(PathStep {
                         parent: current,
@@ -95,11 +94,11 @@ impl Node {
         }
     }
 
-    fn sample_node(nodes: &[Node]) -> &Node {
+    fn sample_node<'a>(rng: &mut Rng, nodes: &'a [Node]) -> &'a Node {
         if nodes.len() == 1 {
             return &nodes[0];
         }
-        let roll = rng().random_range(0f32..100f32);
+        let roll = rng.random_range(0f32..100f32);
         let mut prefix_sum = 0f32;
         for m in nodes {
             prefix_sum += m.percentage;
@@ -117,6 +116,7 @@ impl Node {
         s2_move_index: u8,
         children: &mut ChildMap,
         depth: usize,
+        rng: &mut Rng,
     ) -> Option<*const Node> {
         let s1_move = &self.options.get().unwrap().s1()[s1_move_index as usize].move_choice;
         let s2_move = &self.options.get().unwrap().s2()[s2_move_index as usize].move_choice;
@@ -138,7 +138,7 @@ impl Node {
 
         // sample a node from the new instruction list.
         // this is the node that the rollout will be done on
-        let new_node_ptr = Node::sample_node(&this_pair_slice) as *const Node;
+        let new_node_ptr = Node::sample_node(rng, &this_pair_slice) as *const Node;
         let key = (self as *const Node as usize, s1_move_index, s2_move_index);
         children.insert(key, this_pair_slice);
         Some(new_node_ptr)
@@ -245,12 +245,13 @@ fn do_mcts(
     children: &mut ChildMap,
     path: &mut Vec<PathStep>,
     timers: &mut Timers,
+    rng: &mut Rng,
 ) {
     path.clear();
     let t0 = Instant::now();
-    let (leaf, s1_index, s2_index) = Node::selection(root_node, state, children, path);
+    let (leaf, s1_index, s2_index) = Node::selection(root_node, state, children, path, rng);
     let t1 = Instant::now();
-    let expanded = unsafe { &*leaf }.expand(state, s1_index, s2_index, children, path.len());
+    let expanded = unsafe { &*leaf }.expand(state, s1_index, s2_index, children, path.len(), rng);
     let rollout_target = if let Some(child) = expanded {
         let child = unsafe { &*child };
         state.apply_instructions(&child.instruction_list);
@@ -299,6 +300,7 @@ pub fn perform_mcts_inner(
     ));
     let mut children: ChildMap = ChildMap::new();
     let mut path = Vec::with_capacity(16);
+    let mut rng = Rng::from_rng(&mut rng());
 
     let root_eval = evaluate(state);
     let start_time = Instant::now();
@@ -311,6 +313,7 @@ pub fn perform_mcts_inner(
                 &mut children,
                 &mut path,
                 &mut timers,
+                &mut rng,
             );
         }
 

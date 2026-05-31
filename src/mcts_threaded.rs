@@ -7,7 +7,7 @@ use crate::perf::Timers;
 use crate::state::State;
 use dashmap::DashMap;
 use rand::prelude::*;
-use rand::rng;
+use rand::{rng, rngs::SmallRng as Rng, Rng as _};
 use std::sync::atomic::{AtomicI8, AtomicU32, Ordering};
 use std::sync::OnceLock;
 use std::thread;
@@ -77,7 +77,7 @@ impl MoveNode {
     }
 }
 
-fn sample_node<'a, R: Rng + ?Sized>(nodes: &'a [Node], rng: &mut R) -> &'a Node {
+fn sample_node<'a>(nodes: &'a [Node], rng: &mut Rng) -> &'a Node {
     if nodes.len() <= 1 {
         return &nodes[0];
     }
@@ -156,10 +156,10 @@ impl Node {
         )
     }
 
-    fn selection<R: Rng + ?Sized>(
+    fn selection(
         root: &Node,
         state: &mut State,
-        rng: &mut R,
+        rng: &mut Rng,
         children: &ChildMap,
         path: &mut Vec<PathStep>,
     ) -> (*const Node, u8, u8) {
@@ -222,12 +222,12 @@ impl Node {
     /// looks up or creates the child branch for `(s1_index, s2_index)` and
     /// returns one sampled child, applying virtual loss bookkeeping.  Returns
     /// `None` when the node should not be expanded (battle over, both-None).
-    fn expand<R: Rng + ?Sized>(
+    fn expand(
         &self,
         state: &mut State,
         s1_index: u8,
         s2_index: u8,
-        rng: &mut R,
+        rng: &mut Rng,
         children: &ChildMap,
         depth: usize,
     ) -> Option<*const Node> {
@@ -293,11 +293,11 @@ impl Node {
     }
 }
 
-fn do_mcts<R: Rng + ?Sized>(
+fn do_mcts(
     root: &Node,
     state: &mut State,
     root_eval: f32,
-    rng: &mut R,
+    rng: &mut Rng,
     children: &ChildMap,
     path: &mut Vec<PathStep>,
     timers: &mut Timers,
@@ -390,7 +390,7 @@ pub fn perform_mcts_shared_tree_inner(
             let started_iterations = &started_iterations;
             let mut worker_state = state.clone();
             scope.spawn(move || {
-                let mut rng = rng();
+                let mut rng = rand::rngs::SmallRng::from_rng(&mut rng());
                 let mut path = Vec::with_capacity(16);
 
                 while Instant::now() < deadline {
