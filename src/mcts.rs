@@ -95,16 +95,19 @@ impl Node {
         }
     }
 
-    fn sample_node(moves: &[Node]) -> &Node {
+    fn sample_node(nodes: &[Node]) -> &Node {
+        if nodes.len() == 1 {
+            return &nodes[0];
+        }
         let roll = rng().random_range(0f32..100f32);
         let mut prefix_sum = 0f32;
-        for m in moves {
+        for m in nodes {
             prefix_sum += m.percentage;
             if prefix_sum >= roll {
                 return m;
             }
         }
-        moves.last().unwrap()
+        nodes.last().unwrap()
     }
 
     fn expand(
@@ -124,8 +127,10 @@ impl Node {
             return None;
         }
         let should_branch_on_damage = depth < MCTS_DAMAGE_BRANCH_DEPTH;
-        let new_instructions =
+        let mut new_instructions =
             generate_instructions_from_move_pair(state, s1_move, s2_move, should_branch_on_damage);
+        // put the most likely branches first
+        new_instructions.sort_unstable_by(|l, r| l.percentage.total_cmp(&r.percentage).reverse());
         let this_pair_slice = new_instructions
             .into_iter()
             .map(|state_instructions| Node::new(state_instructions))

@@ -245,8 +245,10 @@ impl Node {
         }
 
         let should_branch_on_damage = depth < MCTS_DAMAGE_BRANCH_DEPTH;
-        let instructions =
+        let mut instructions =
             generate_instructions_from_move_pair(state, s1_move, s2_move, should_branch_on_damage);
+        // put the most likely branches first
+        instructions.sort_unstable_by(|l, r| l.percentage.total_cmp(&r.percentage).reverse());
 
         let nodes = instructions
             .into_iter()
