@@ -1,6 +1,7 @@
 use crate::engine::evaluate::evaluate;
 use crate::engine::generate_instructions::generate_instructions_from_move_pair;
 use crate::engine::state::MoveChoice;
+use crate::instruction::Instruction;
 use crate::instruction::StateInstructions;
 use crate::perf::Timers;
 use crate::state::State;
@@ -28,18 +29,21 @@ pub type ChildMap = HashMap<ChildMapK, ChildMapV>;
 pub struct Node {
     pub times_visited: Cell<u32>,
 
+    /// How likely this node was as a result of the parent.
+    pub percentage: f32,
     // represents the instructions that led to this node from the parent
-    pub instructions: StateInstructions,
+    pub instruction_list: Box<[Instruction]>,
 
     /// represents the total score and number of visits for this node
     pub options: OnceCell<NodeOptions>,
 }
 
 impl Node {
-    fn new() -> Node {
+    fn new(instructions: StateInstructions) -> Node {
         Node {
-            instructions: StateInstructions::default(),
             times_visited: Cell::new(0),
+            instruction_list: instructions.instruction_list.into_boxed_slice(),
+            percentage: instructions.percentage,
             options: OnceCell::new(),
         }
     }
@@ -77,7 +81,7 @@ impl Node {
             match children.get_mut(&key) {
                 Some(child_slice) => {
                     let chosen_child = Node::sample_node(child_slice);
-                    state.apply_instructions(&chosen_child.instructions.instruction_list);
+                    state.apply_instructions(&chosen_child.instruction_list);
                     path.push(PathStep {
                         parent: current,
                         child: chosen_child,
@@ -95,7 +99,7 @@ impl Node {
         let roll = rng().random_range(0f32..100f32);
         let mut prefix_sum = 0f32;
         for m in moves {
-            prefix_sum += m.instructions.percentage;
+            prefix_sum += m.percentage;
             if prefix_sum >= roll {
                 return m;
             }
@@ -124,12 +128,7 @@ impl Node {
             generate_instructions_from_move_pair(state, s1_move, s2_move, should_branch_on_damage);
         let this_pair_slice = new_instructions
             .into_iter()
-            .map(|mut state_instructions| {
-                let mut new_node = Node::new();
-                state_instructions.instruction_list.shrink_to_fit();
-                new_node.instructions = state_instructions;
-                new_node
-            })
+            .map(|state_instructions| Node::new(state_instructions))
             .collect::<Box<[Node]>>();
 
         // sample a node from the new instruction list.
@@ -156,7 +155,7 @@ impl Node {
 
             parent.times_visited.update(|v| v + 1);
 
-            state.reverse_instructions(&child.instructions.instruction_list);
+            state.reverse_instructions(&child.instruction_list);
         }
     }
 
@@ -249,7 +248,7 @@ fn do_mcts(
     let expanded = unsafe { &*leaf }.expand(state, s1_index, s2_index, children, path.len());
     let rollout_target = if let Some(child) = expanded {
         let child = unsafe { &*child };
-        state.apply_instructions(&child.instructions.instruction_list);
+        state.apply_instructions(&child.instruction_list);
         path.push(PathStep {
             parent: leaf,
             child,
@@ -287,7 +286,7 @@ pub fn perform_mcts_inner(
     max_time: Duration,
 ) -> (MctsResult, Box<Node>, Timers, ChildMap) {
     let mut timers = Timers::default();
-    let mut root_node = Box::new(Node::new());
+    let mut root_node = Box::new(Node::new(StateInstructions::default()));
     root_node.options = OnceCell::from(NodeOptions::new(
         &side_one_options,
         &side_two_options,
