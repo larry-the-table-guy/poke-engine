@@ -63,18 +63,20 @@ impl VolatileStatusBitSet {
 // A thin boxed slice with two sections.
 //
 // Follows the design of other thin smart pointers pretty closely.
-pub use move_options::NodeOptions;
+pub use move_options::{NodeOptions, NodeOptionsHandle};
 mod move_options {
     use crate::engine::state::MoveChoice;
     use crate::perf::arena::Arena;
     use std::convert::TryInto;
+    use std::marker::PhantomData;
+    use std::num::NonZeroU32;
     #[repr(C)]
     pub struct NodeOptions<'a, T> {
-        ptr: core::ptr::NonNull<Header>,
-        _phant: core::marker::PhantomData<(T, &'a ())>,
+        pub(super) ptr: core::ptr::NonNull<Header>,
+        pub(super) _phant: core::marker::PhantomData<(T, &'a ())>,
     }
     #[repr(C)]
-    struct Header {
+    pub(super) struct Header {
         len_s1: u8,
         len_s2: u8,
     }
@@ -86,13 +88,13 @@ mod move_options {
             s1: &[MoveChoice],
             s2: &[MoveChoice],
             mut ctor: impl FnMut(MoveChoice) -> T,
-        ) -> Self {
+        ) -> NodeOptionsHandle<'a, T> {
             let total_len = s1.len() + s2.len();
             let len_s1: u8 = s1.len().try_into().unwrap();
             let len_s2: u8 = s2.len().try_into().unwrap();
             // Total len can't be more than 510, so we can't overflow usize
             unsafe {
-                let ptr = arena.alloc_raw(
+                let (offset, ptr) = arena.alloc_raw(
                     align_of::<Header>().max(align_of::<T>()),
                     Self::DATA_OFFSET + size_of::<T>() * total_len as usize,
                 );
@@ -105,10 +107,7 @@ mod move_options {
                         data_ptr = data_ptr.add(1);
                     }
                 }
-                Self {
-                    ptr,
-                    _phant: core::marker::PhantomData,
-                }
+                NodeOptionsHandle(offset, core::marker::PhantomData)
             }
         }
 
@@ -185,6 +184,19 @@ mod move_options {
         T: Send,
     {
     }
+
+    pub struct NodeOptionsHandle<'arena, T>(NonZeroU32, PhantomData<(T, &'arena ())>);
+    impl<'arena, T> NodeOptionsHandle<'arena, T> {
+        pub fn resolve(&self, arena: &Arena<'arena>) -> NodeOptions<'arena, T> {
+            super::NodeOptions {
+                ptr: unsafe {
+                    core::ptr::NonNull::new_unchecked(arena.base.add(self.0.get() as usize))
+                        .cast::<Header>()
+                },
+                _phant: PhantomData,
+            }
+        }
+    }
 }
 
 /// Bump allocator with fast mass free().
@@ -201,154 +213,159 @@ mod move_options {
 /// If you insert objects containing a Box or Vec or String or etc, they will be leaked when
 /// the arena gets reset or dropped. That is memory-safe behavior, but rarely desirable.
 pub mod arena {
-    use std::alloc::{alloc, dealloc, handle_alloc_error, Layout};
+    // TODO: branded lifetimes to make unchecked resolve sound
+    use std::{
+        alloc::{alloc, dealloc, handle_alloc_error, Layout},
+        hash::Hash,
+        marker::PhantomData,
+        num::NonZeroU32,
+        sync::atomic,
+    };
 
     pub struct ConcurrentArena {
-        inner: std::sync::Mutex<Inner>,
+        base: *mut u8,
+        used: atomic::AtomicUsize,
     }
     impl ConcurrentArena {
+        const CAPACITY: usize = 1 << 32; // 4GB
+        const DEFAULT_SLICE_LEN: usize = 1 << 23; //  8MB
+        const LAYOUT: Layout = unsafe { Layout::from_size_align_unchecked(Self::CAPACITY, 4) };
         pub fn new() -> Self {
+            let p = unsafe { alloc(Self::LAYOUT) };
+            if p.is_null() {
+                handle_alloc_error(Self::LAYOUT)
+            }
+            // Reserve the first 4 bytes so that Handles are all NonZero
+            unsafe { p.cast::<[u8; 4]>().write([0; 4]) }
             Self {
-                inner: std::sync::Mutex::new(Inner::new()),
+                base: p,
+                used: atomic::AtomicUsize::new(4),
             }
         }
 
-        pub fn handle<'a>(&'a self) -> Arena<'a> {
+        pub fn sub_arena<'a>(&'a self) -> Arena<'a> {
             Arena {
-                base: self,
-                ptr: core::ptr::null_mut(),
+                parent: self,
+                base: self.base,
+                offset: 4,
                 rem_len: 0,
             }
         }
-        fn alloc_slice(&self, min_size: usize) -> *mut [u8] {
-            self.inner.lock().unwrap().alloc_slice(min_size)
-        }
 
-        /// Total number of bytes currently retained by this Arena.
-        pub fn total(&self) -> usize {
-            self.inner
-                .lock()
-                .unwrap()
-                .backing
-                .iter()
-                .map(|s| s.len())
-                .sum()
+        fn alloc_slice(&self, min_size: usize) -> (usize, usize) {
+            let size = min_size.max(Self::DEFAULT_SLICE_LEN);
+            let offset = self.used.fetch_add(size, atomic::Ordering::SeqCst);
+            if offset + size > Self::CAPACITY {
+                handle_alloc_error(unsafe { Layout::from_size_align_unchecked(size, 1) });
+            }
+            (offset, size)
         }
 
         pub fn reset(&mut self) {
             // exclusive borrow means no allocations into the arena can still be alive
-            self.inner.get_mut().unwrap().reset()
+            *self.used.get_mut() = 4;
         }
     }
-    /// Linked list of large allocated slices
-    struct Inner {
-        backing: Vec<*mut [u8]>,
-        // index into self.allocs, the slice currently being partitioned.
-        current_idx: usize,
-        // how much of the current slice has been consumed
-        current_used_len: usize,
-    }
-    unsafe impl Send for Inner {}
-    impl Inner {
-        const DEFAULT_CHUNK_LEN: usize = 1 << 26; // 64MB
-        const DEFAULT_SLICE_LEN: usize = 1 << 23; //  8MB
-        fn new() -> Self {
-            let p = Self::alloc_chunk(Self::DEFAULT_CHUNK_LEN);
-            Self {
-                backing: vec![p],
-                current_idx: 0,
-                current_used_len: 0,
-            }
-        }
-        fn alloc_chunk(len: usize) -> *mut [u8] {
-            unsafe {
-                let layout = Layout::from_size_align(len, 1).unwrap();
-                let p = alloc(layout);
-                if p.is_null() {
-                    handle_alloc_error(layout)
-                }
-                core::ptr::slice_from_raw_parts_mut(p, len)
-            }
-        }
-        fn free_chunk(chunk: *mut [u8]) {
-            unsafe {
-                dealloc(
-                    chunk.cast::<u8>(),
-                    Layout::from_size_align_unchecked(chunk.len(), 1),
-                );
-            }
-        }
-        fn alloc_slice(&mut self, size: usize) -> *mut [u8] {
-            // NOTE: this is more robust than it needs to be. Could just as well only deal in fixed
-            // size slices
-
-            let rem_len = self.backing[self.current_idx].len() - self.current_used_len;
-            if rem_len < size {
-                self.current_idx += 1;
-                // Received extremely large request, free up reserved chunks that are too small.
-                // unreachable in practice, actual allocs are tiny.
-                while self.current_idx < self.backing.len()
-                    && self.backing[self.current_idx].len() < size
-                {
-                    Self::free_chunk(self.backing.swap_remove(self.current_idx));
-                }
-                if self.current_idx == self.backing.len() {
-                    self.backing
-                        .push(Self::alloc_chunk(size.max(Self::DEFAULT_CHUNK_LEN)));
-                }
-                self.current_used_len = 0;
-            }
-            let rem_len = self.backing[self.current_idx].len() - self.current_used_len;
-            let given_size = size.max(Self::DEFAULT_SLICE_LEN.min(rem_len));
-            let give = core::ptr::slice_from_raw_parts_mut(
-                unsafe {
-                    self.backing[self.current_idx]
-                        .cast::<u8>()
-                        .add(self.current_used_len)
-                },
-                given_size,
-            );
-            self.current_used_len += given_size;
-            give
-        }
-        fn reset(&mut self) {
-            self.current_idx = 0;
-            self.current_used_len = 0;
-        }
-    }
-    impl Drop for Inner {
+    unsafe impl Sync for ConcurrentArena {}
+    impl Drop for ConcurrentArena {
         fn drop(&mut self) {
-            for chunk in self.backing.drain(..) {
-                Self::free_chunk(chunk);
-            }
+            unsafe { dealloc(self.base, Self::LAYOUT) };
         }
     }
+
+    /// 4 byte offset into an Arena.
+    /// The offset is between 4 and u32::MAX.
+    #[repr(transparent)]
+    pub struct Handle<'arena, T>(NonZeroU32, PhantomData<&'arena T>);
+    impl<'arena, T> Handle<'arena, T> {
+        /// Safety: this `Handle` must have been derived from `arena`.
+        pub fn resolve(&self, arena: &Arena<'arena>) -> &'arena T {
+            unsafe { &*arena.base.add(self.0.get() as usize).cast::<T>() }
+        }
+    }
+    impl<'arena, T> Clone for Handle<'arena, T> {
+        fn clone(&self) -> Self {
+            Self(self.0.clone(), self.1.clone())
+        }
+    }
+    impl<'arena, T> Copy for Handle<'arena, T> {}
+    impl<'a, T> PartialEq for Handle<'a, T> {
+        fn eq(&self, other: &Self) -> bool {
+            self.0 == other.0
+        }
+    }
+    impl<'a, T> Eq for Handle<'a, T> {}
+    impl<'a, T> Hash for Handle<'a, T> {
+        fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+            self.0.hash(state);
+        }
+    }
+
+    /// 4 byte offset into an Arena.
+    /// The offset is between 4 and u32::MAX.
+    pub struct SliceHandle<'arena, T>(NonZeroU32, u32, PhantomData<&'arena T>);
+    impl<'arena, T> SliceHandle<'arena, T> {
+        /// Safety: this `Handle` must have been derived from `arena`.
+        pub fn resolve(&self, arena: &Arena<'arena>) -> &'arena [T] {
+            unsafe {
+                core::slice::from_raw_parts(
+                    arena.base.add(self.0.get() as usize).cast::<T>(),
+                    self.1 as usize,
+                )
+            }
+        }
+        pub fn len(&self) -> usize {
+            self.1 as usize
+        }
+        pub fn iter(&self) -> impl ExactSizeIterator<Item = Handle<'arena, T>> {
+            let base = self.0.get();
+            (0..self.len()).map(move |i| {
+                Handle(
+                    unsafe { NonZeroU32::new_unchecked(base + (i * size_of::<T>()) as u32) },
+                    PhantomData,
+                )
+            })
+        }
+    }
+    impl<'arena, T> Clone for SliceHandle<'arena, T> {
+        fn clone(&self) -> Self {
+            Self(self.0.clone(), self.1.clone(), self.2.clone())
+        }
+    }
+    impl<'arena, T> Copy for SliceHandle<'arena, T> {}
 
     pub struct Arena<'arena> {
-        base: &'arena ConcurrentArena,
-        ptr: *mut u8,
+        parent: &'arena ConcurrentArena,
+        // duplicated to reduce indirection
+        pub(super) base: *mut u8,
+        offset: usize,
         rem_len: usize,
     }
     impl<'arena> Arena<'arena> {
-        pub fn alloc<T>(&mut self, e: T) -> &'arena mut T {
+        /// Insert a single element, returns the handle
+        pub fn alloc<T>(&mut self, e: T) -> Handle<'arena, T> {
             // valid len and align
             unsafe {
-                let p = self.alloc_raw(align_of::<T>(), size_of::<T>());
+                let (o, p) = self.alloc_raw(align_of::<T>(), size_of::<T>());
                 p.write(e);
-                &mut *p.as_ptr()
+                Handle(o, PhantomData)
             }
         }
-        pub fn alloc_slice<T>(
+
+        /// Insert a contiguous sequence of elements, returns the handle
+        ///
+        /// Safety: `elems` must accurately report its length (true for standard library types)
+        pub unsafe fn alloc_slice<T>(
             &mut self,
             elems: impl ExactSizeIterator<Item = T>,
-        ) -> &'arena mut [T] {
+        ) -> SliceHandle<'arena, T> {
             let len = elems.len();
             unsafe {
-                let p = self.alloc_raw(align_of::<T>(), len * size_of::<T>());
+                let (o, p) = self.alloc_raw(align_of::<T>(), len * size_of::<T>());
                 for (idx, e) in elems.enumerate() {
                     p.add(idx).write(e);
                 }
-                core::slice::from_raw_parts_mut(p.as_ptr(), len)
+                SliceHandle(o, len as u32, PhantomData)
             }
         }
         /// Safety:
@@ -360,26 +377,30 @@ pub mod arena {
             self: &mut Self,
             align: usize,
             len: usize,
-        ) -> core::ptr::NonNull<T> {
+        ) -> (NonZeroU32, core::ptr::NonNull<T>) {
             debug_assert!(align.is_power_of_two());
             debug_assert!(len.is_multiple_of(align));
-            let mut align_offset = self.ptr.align_offset(align);
+            let mut align_offset = self.base.add(self.offset).align_offset(align);
             if self.rem_len < align_offset + len {
                 // can't satisfy this request, have to get a new slice from the base allocator.
                 self.refresh_backing_slice(align + len);
-                align_offset = self.ptr.align_offset(align);
+                align_offset = self.base.add(self.offset).align_offset(align);
             }
             // Safety: the request fits inside the backing slice.
-            let give = unsafe { self.ptr.byte_add(align_offset).cast() };
-            self.ptr = unsafe { self.ptr.byte_add(align_offset + len) };
+            let given_offset = self.offset as usize + align_offset;
+            let give = unsafe { self.base.byte_add(given_offset).cast() };
+            let given_offset = NonZeroU32::new_unchecked(given_offset as u32);
+            self.offset += align_offset + len;
             self.rem_len -= align_offset + len;
-            unsafe { core::ptr::NonNull::new_unchecked(give) }
+            (given_offset, unsafe {
+                core::ptr::NonNull::new_unchecked(give)
+            })
         }
         #[cold]
         fn refresh_backing_slice(&mut self, min_size: usize) {
-            let new_slice = self.base.alloc_slice(min_size);
-            self.ptr = new_slice.cast();
-            self.rem_len = new_slice.len();
+            let (offset, len) = self.parent.alloc_slice(min_size);
+            self.offset = offset;
+            self.rem_len = len;
         }
     }
 }
@@ -392,7 +413,7 @@ mod tests {
         use super::arena;
         use crate::engine::state::MoveChoice;
         let ar = arena::ConcurrentArena::new();
-        let ar = &mut ar.handle();
+        let ar = &mut ar.sub_arena();
         type NodeOptions<'a> = super::NodeOptions<'a, MoveNode>;
         #[derive(Debug, PartialEq)]
         struct MoveNode(MoveChoice, f32, u32);
@@ -400,12 +421,14 @@ mod tests {
         let s1 = &[];
         let s2 = &[];
         let a = NodeOptions::new_in(ar, s1, s2, |mc| MoveNode(mc, 0., 0));
+        let a = a.resolve(ar);
         assert_eq!(a.s1().len(), 0);
         assert_eq!(a.s2().len(), 0);
 
         let s1 = &[MoveChoice::None, MoveChoice::None];
         let s2 = &[MoveChoice::None];
-        let mut a = NodeOptions::new_in(ar, s1, s2, |mc| MoveNode(mc, 2., 3));
+        let a = NodeOptions::new_in(ar, s1, s2, |mc| MoveNode(mc, 2., 3));
+        let mut a = a.resolve(ar);
         assert_eq!(&a.s1().iter().map(|n| n.0).collect::<Vec<_>>(), s1);
         assert_eq!(&a.s2().iter().map(|n| n.0).collect::<Vec<_>>(), s2);
         a.s2_mut()[0].2 += 2;
@@ -419,7 +442,8 @@ mod tests {
             MoveChoice::None,
             MoveChoice::None,
         ];
-        let mut a = NodeOptions::new_in(ar, s1, s2, |mc| MoveNode(mc, 2., 3));
+        let a = NodeOptions::new_in(ar, s1, s2, |mc| MoveNode(mc, 2., 3));
+        let mut a = a.resolve(ar);
         assert_eq!(&a.s1().iter().map(|n| n.0).collect::<Vec<_>>(), s1);
         assert_eq!(&a.s2().iter().map(|n| n.0).collect::<Vec<_>>(), s2);
         a.s1_mut()[1].2 += 2;

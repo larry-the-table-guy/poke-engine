@@ -142,21 +142,22 @@ fn bench_mcts(num_threads: Option<NonZeroU32>, max_time: Duration, skip_stats: b
             let time_ms = start.elapsed().as_millis() as u64;
             if !skip_stats {
                 proc_mem_usage = memory_stats::memory_stats();
-                stats.analyze_threaded_tree(&root, &childmap);
+                stats.analyze_threaded_tree(&arena.sub_arena(), root, &childmap);
             }
             (r.iteration_count, time_ms)
         } else {
+            let mut sub_arena = arena.sub_arena();
             let (r, root, childmap) = mcts::perform_mcts_inner(
                 &mut state,
                 s1_options,
                 s2_options,
                 max_time,
-                &mut arena.handle(),
+                &mut sub_arena,
             );
             let time_ms = start.elapsed().as_millis() as u64;
             if !skip_stats {
                 proc_mem_usage = memory_stats::memory_stats();
-                stats.analyze_tree(&root, &childmap);
+                stats.analyze_tree(&sub_arena, root, &childmap);
             }
             (r.iteration_count, time_ms)
         };

@@ -3,7 +3,7 @@ use crate::engine::generate_instructions::generate_instructions_from_move_pair;
 use crate::engine::state::MoveChoice;
 use crate::instruction::Instruction;
 use crate::mcts::{MctsResult, MctsSideResult};
-use crate::perf::arena::{Arena, ConcurrentArena};
+use crate::perf::arena::{Arena, ConcurrentArena, Handle, SliceHandle};
 use crate::state::State;
 use dashmap::DashMap;
 use rand::prelude::*;
@@ -19,14 +19,15 @@ const MCTS_DAMAGE_BRANCH_DEPTH: usize = 2;
 const SCORE_SCALE: f32 = 400.0;
 const VIRTUAL_LOSS_VISITS: u32 = 3;
 
+type NodeHandle<'a> = Handle<'a, Node<'a>>;
 pub type SharedNodeOptions<'a> = crate::perf::NodeOptions<'a, MoveNode>;
+pub type NodeOptionsHandle<'a> = crate::perf::NodeOptionsHandle<'a, MoveNode>;
 
-pub type ChildMapK = (usize, u8, u8);
-pub type ChildMapV<'a> = &'a [Node<'a>];
+pub type ChildMapK<'a> = (NodeHandle<'a>, u8, u8);
+pub type ChildMapV<'a> = SliceHandle<'a, Node<'a>>;
 // Node map type alias for clarity.
 // key: (parent node address, s1_move_index, s2_move_index)
-// value: the branch (weighted list of outcome nodes for that move pair)
-pub type ChildMap<'a> = DashMap<ChildMapK, ChildMapV<'a>, foldhash::fast::RandomState>;
+pub type ChildMap<'a> = DashMap<ChildMapK<'a>, ChildMapV<'a>, foldhash::fast::RandomState>;
 
 fn sigmoid(x: f32) -> f32 {
     // Tuned so that ~200 points is very close to 1.0
@@ -77,19 +78,23 @@ impl MoveNode {
     }
 }
 
-fn sample_node<'a>(nodes: &'a [Node<'a>], rng: &mut Rng) -> &'a Node<'a> {
+fn sample_node<'a>(
+    nodes: SliceHandle<'a, Node<'a>>,
+    arena: &Arena<'a>,
+    rng: &mut Rng,
+) -> NodeHandle<'a> {
     if nodes.len() <= 1 {
-        return &nodes[0];
+        return nodes.iter().next().unwrap();
     }
     let mut prefix_sum = 0.;
     let roll = rng.random_range(0f32..100f32);
     for node in nodes.iter() {
-        prefix_sum += node.percentage.max(0.0);
+        prefix_sum += node.resolve(arena).percentage.max(0.0);
         if prefix_sum >= roll {
             return node;
         }
     }
-    &nodes[nodes.len() - 1]
+    nodes.iter().last().unwrap()
 }
 
 struct PathStep<'a> {
@@ -102,9 +107,9 @@ struct PathStep<'a> {
 pub struct Node<'a> {
     pub times_visited: AtomicU32,
     pub percentage: f32,
-    pub instruction_list: &'a [Instruction],
+    pub instruction_list: SliceHandle<'a, Instruction>,
     virtual_losses: AtomicI8,
-    pub options: OnceLock<SharedNodeOptions<'a>>,
+    pub options: OnceLock<NodeOptionsHandle<'a>>,
 }
 
 impl<'a> Node<'a> {
@@ -116,7 +121,7 @@ impl<'a> Node<'a> {
         Self {
             times_visited: AtomicU32::new(0),
             percentage: 100.,
-            instruction_list: &[],
+            instruction_list: unsafe { arena.alloc_slice([].iter().cloned()) },
             virtual_losses: AtomicI8::new(0),
             options: OnceLock::from(SharedNodeOptions::new_in(
                 arena,
@@ -127,7 +132,7 @@ impl<'a> Node<'a> {
         }
     }
 
-    fn new_child(percentage: f32, instruction_list: &'a [Instruction]) -> Self {
+    fn new_child(percentage: f32, instruction_list: SliceHandle<'a, Instruction>) -> Self {
         Self {
             times_visited: AtomicU32::new(0),
             percentage,
@@ -137,11 +142,7 @@ impl<'a> Node<'a> {
         }
     }
 
-    fn as_key(&self) -> usize {
-        self as *const Node as usize
-    }
-
-    fn ensure_options(&self, arena: &mut Arena<'a>, state: &State) -> &SharedNodeOptions<'a> {
+    fn ensure_options(&self, arena: &mut Arena<'a>, state: &State) -> &NodeOptionsHandle<'a> {
         self.options.get_or_init(|| {
             let (s1, s2) = state.get_all_options();
             SharedNodeOptions::new_in(arena, &s1, &s2, MoveNode::new)
@@ -149,7 +150,7 @@ impl<'a> Node<'a> {
     }
 
     fn select_move_pair(&self, arena: &mut Arena<'a>, state: &State) -> (u8, u8) {
-        let options = self.ensure_options(arena, state);
+        let options = self.ensure_options(arena, state).resolve(arena);
         let parent_visits = self
             .times_visited
             .load(Ordering::Acquire)
@@ -162,26 +163,31 @@ impl<'a> Node<'a> {
     }
 
     fn selection(
-        root: &'a Node<'a>,
+        root: NodeHandle<'a>,
         state: &mut State,
         rng: &mut Rng,
         children: &ChildMap<'a>,
         path: &mut Vec<PathStep<'a>>,
         arena: &mut Arena<'a>,
-    ) -> (&'a Node<'a>, u8, u8) {
+    ) -> (NodeHandle<'a>, u8, u8) {
         // raw pointers walk both the root (a standalone Arc<Node>) and children
         // (Nodes living inside a branch's Arc<[Node]>) uniformly. every node is
         // owned by children/root for the whole search, so the pointers stay
         // valid
         let mut current = root;
         loop {
-            let (s1_index, s2_index) = current.select_move_pair(arena, state);
-            let options = current.options.get().expect("options set during selection");
+            let (s1_index, s2_index) = current.resolve(arena).select_move_pair(arena, state);
+            let options = current
+                .resolve(arena)
+                .options
+                .get()
+                .expect("options set during selection")
+                .resolve(arena);
 
-            let key = (current.as_key(), s1_index, s2_index);
+            let key = (current, s1_index, s2_index);
             match children.get(&key) {
                 Some(branch) => {
-                    let child = sample_node(&branch, rng);
+                    let child = sample_node(*branch, arena, rng);
 
                     // drop the DashMap ref before mutating state to avoid
                     // holding the lock any longer than necessary. the sampled
@@ -191,11 +197,14 @@ impl<'a> Node<'a> {
 
                     options.s1()[s1_index as usize].add_virtual_loss();
                     options.s2()[s2_index as usize].add_virtual_loss();
-                    child.virtual_losses.fetch_add(1, Ordering::AcqRel);
-                    state.apply_instructions(&child.instruction_list);
+                    child
+                        .resolve(arena)
+                        .virtual_losses
+                        .fetch_add(1, Ordering::AcqRel);
+                    state.apply_instructions(child.resolve(arena).instruction_list.resolve(arena));
                     path.push(PathStep {
-                        parent: current,
-                        child,
+                        parent: current.resolve(arena),
+                        child: child.resolve(arena),
                         s1_index,
                         s2_index,
                     });
@@ -226,7 +235,7 @@ impl<'a> Node<'a> {
     /// returns one sampled child, applying virtual loss bookkeeping.  Returns
     /// `None` when the node should not be expanded (battle over, both-None).
     fn expand(
-        &self,
+        leaf: NodeHandle<'a>,
         state: &mut State,
         s1_index: u8,
         s2_index: u8,
@@ -234,11 +243,13 @@ impl<'a> Node<'a> {
         children: &ChildMap<'a>,
         depth: usize,
         arena: &mut Arena<'a>,
-    ) -> Option<&'a Node<'a>> {
-        let options = self
+    ) -> Option<NodeHandle<'a>> {
+        let options = leaf
+            .resolve(arena)
             .options
             .get()
-            .expect("options initialised before expand");
+            .expect("options initialised before expand")
+            .resolve(arena);
         let s1_move = &options.s1()[s1_index as usize].move_choice;
         let s2_move = &options.s2()[s2_index as usize].move_choice;
 
@@ -256,23 +267,24 @@ impl<'a> Node<'a> {
         let instructions = instructions
             .into_iter()
             .map(|si| {
-                (
-                    si.percentage,
-                    arena.alloc_slice(si.instruction_list.into_iter()),
-                )
+                (si.percentage, unsafe {
+                    arena.alloc_slice(si.instruction_list.into_iter())
+                })
             })
             .collect::<Vec<_>>();
-        let nodes = arena.alloc_slice(
-            instructions
-                .into_iter()
-                .map(|si| Node::new_child(si.0, si.1)),
-        );
-        let key = (self.as_key(), s1_index, s2_index);
+        let nodes = unsafe {
+            arena.alloc_slice(
+                instructions
+                    .into_iter()
+                    .map(|si| Node::new_child(si.0, si.1)),
+            )
+        };
+        let key = (leaf, s1_index, s2_index);
         // entry() on DashMap is atomic per-shard: only one thread will
         // construct the branch; all others get the winner's branch.
         let nodes_ref = children.entry(key).or_insert(nodes);
 
-        Some(sample_node(&nodes_ref, rng))
+        Some(sample_node(*nodes_ref, arena, rng))
     }
 
     fn rollout(&self, state: &State, root_eval: f32) -> f32 {
@@ -289,25 +301,35 @@ impl<'a> Node<'a> {
     // walk `path` in reverse, updating visit counts and scores,
     // removes virtual losses, and reverse-applying instructions to restore `state` to how it
     // was in the root
-    fn backpropagate(path: &[PathStep], leaf: &Node, score: f32, state: &mut State) {
+    fn backpropagate(
+        path: &[PathStep],
+        leaf: &Node,
+        score: f32,
+        state: &mut State,
+        arena: &Arena<'a>,
+    ) {
         leaf.times_visited.fetch_add(1, Ordering::AcqRel);
 
         for step in path.iter().rev() {
             let (parent, child) = (step.parent, step.child);
-            let options = parent.options.get().expect("path parent has options");
+            let options = parent
+                .options
+                .get()
+                .expect("path parent has options")
+                .resolve(arena);
             options.s1()[step.s1_index as usize].add_result(score);
             options.s1()[step.s1_index as usize].remove_virtual_loss();
             options.s2()[step.s2_index as usize].add_result(1.0 - score);
             options.s2()[step.s2_index as usize].remove_virtual_loss();
             parent.times_visited.fetch_add(1, Ordering::AcqRel);
             child.virtual_losses.fetch_sub(1, Ordering::AcqRel);
-            state.reverse_instructions(&child.instruction_list);
+            state.reverse_instructions(child.instruction_list.resolve(arena));
         }
     }
 }
 
 fn do_mcts<'a>(
-    root: &'a Node<'a>,
+    root: NodeHandle<'a>,
     state: &mut State,
     root_eval: f32,
     rng: &mut Rng,
@@ -319,17 +341,34 @@ fn do_mcts<'a>(
 
     let (leaf, s1_index, s2_index) = Node::selection(root, state, rng, children, path, arena);
 
-    let options = leaf.options.get().expect("options set during selection");
+    let options = leaf
+        .resolve(arena)
+        .options
+        .get()
+        .expect("options set during selection")
+        .resolve(arena);
     options.s1()[s1_index as usize].add_virtual_loss();
     options.s2()[s2_index as usize].add_virtual_loss();
-    let expanded = leaf.expand(state, s1_index, s2_index, rng, children, path.len(), arena);
+    let expanded = Node::expand(
+        leaf,
+        state,
+        s1_index,
+        s2_index,
+        rng,
+        children,
+        path.len(),
+        arena,
+    );
     let rollout_target = match expanded {
         Some(child) => {
-            child.virtual_losses.fetch_add(1, Ordering::AcqRel);
-            state.apply_instructions(&child.instruction_list);
+            child
+                .resolve(arena)
+                .virtual_losses
+                .fetch_add(1, Ordering::AcqRel);
+            state.apply_instructions(child.resolve(arena).instruction_list.resolve(arena));
             path.push(PathStep {
-                parent: leaf,
-                child,
+                parent: leaf.resolve(arena),
+                child: child.resolve(arena),
                 s1_index,
                 s2_index,
             });
@@ -347,8 +386,8 @@ fn do_mcts<'a>(
             leaf
         }
     };
-    let score = rollout_target.rollout(state, root_eval);
-    Node::backpropagate(path, &rollout_target, score, state);
+    let score = rollout_target.resolve(arena).rollout(state, root_eval);
+    Node::backpropagate(path, rollout_target.resolve(arena), score, state, arena);
 }
 
 pub fn perform_mcts_shared_tree(
@@ -378,11 +417,11 @@ pub fn perform_mcts_shared_tree_inner<'a>(
     max_time: Duration,
     worker_count: usize,
     base_arena: &'a ConcurrentArena,
-) -> (MctsResult, &'a Node<'a>, ChildMap<'a>) {
+) -> (MctsResult, NodeHandle<'a>, ChildMap<'a>) {
     let root_eval = evaluate(state);
     let deadline = Instant::now() + max_time;
-    let root: &Node = {
-        let mut a = base_arena.handle();
+    let root: NodeHandle = {
+        let mut a = base_arena.sub_arena();
         let node = Node::new_root_in(&mut a, side_one_options, side_two_options);
         a.alloc(node)
     };
@@ -394,19 +433,18 @@ pub fn perform_mcts_shared_tree_inner<'a>(
 
     thread::scope(|scope| {
         for _ in 0..worker_count {
-            let root = &root;
             let children = &children;
             let started_iterations = &started_iterations;
             let mut worker_state = state.clone();
             scope.spawn(move || {
                 let mut rng = rand::rngs::SmallRng::from_rng(&mut rng());
                 let mut path = Vec::with_capacity(16);
-                let mut arena = base_arena.handle();
+                let mut arena = base_arena.sub_arena();
 
                 while Instant::now() < deadline {
                     for _ in 0..MCTS_DEADLINE_CHECK_INTERVAL {
                         do_mcts(
-                            &root,
+                            root,
                             &mut worker_state,
                             root_eval,
                             &mut rng,
@@ -426,7 +464,12 @@ pub fn perform_mcts_shared_tree_inner<'a>(
         }
     });
 
-    let options = root.options.get().expect("root options initialized");
+    let options = root
+        .resolve(&base_arena.sub_arena())
+        .options
+        .get()
+        .expect("root options initialized")
+        .resolve(&base_arena.sub_arena());
     let result = MctsResult {
         s1: options
             .s1()
@@ -446,7 +489,10 @@ pub fn perform_mcts_shared_tree_inner<'a>(
                 visits: v.visits.load(Ordering::Acquire),
             })
             .collect(),
-        iteration_count: root.times_visited.load(Ordering::Acquire),
+        iteration_count: root
+            .resolve(&base_arena.sub_arena())
+            .times_visited
+            .load(Ordering::Acquire),
     };
     (result, root, children)
 }
