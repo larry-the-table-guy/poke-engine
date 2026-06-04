@@ -2,7 +2,7 @@ use crate::engine::evaluate::evaluate;
 use crate::engine::generate_instructions::generate_instructions_from_move_pair;
 use crate::engine::state::MoveChoice;
 use crate::instruction::Instruction;
-use crate::perf::{arena::Arena, Timers};
+use crate::perf::arena::Arena;
 use crate::state::State;
 use foldhash::{HashMap, HashMapExt};
 use rand::{prelude::*, rng, rngs::SmallRng as Rng, Rng as _};
@@ -251,14 +251,11 @@ fn do_mcts<'arena>(
     root_eval: &f32,
     children: &mut ChildMap<'arena>,
     path: &mut Vec<PathStep<'arena>>,
-    timers: &mut Timers,
     rng: &mut Rng,
     arena: &mut Arena<'arena>,
 ) {
     path.clear();
-    let t0 = Instant::now();
     let (leaf, s1_index, s2_index) = Node::selection(root_node, state, children, path, rng, arena);
-    let t1 = Instant::now();
     let expanded = leaf.expand(state, s1_index, s2_index, children, path.len(), rng, arena);
     let rollout_target = if let Some(child) = expanded {
         state.apply_instructions(&child.instruction_list);
@@ -272,15 +269,8 @@ fn do_mcts<'arena>(
     } else {
         leaf
     };
-    let t2 = Instant::now();
     let rollout_result = Node::rollout(state, root_eval);
-    let t3 = Instant::now();
     Node::backpropagate(path, rollout_target, rollout_result, state);
-    let t4 = Instant::now();
-    timers.selection += t1.duration_since(t0).as_nanos() as u64;
-    timers.expand += t2.duration_since(t1).as_nanos() as u64;
-    timers.rollout += t3.duration_since(t2).as_nanos() as u64;
-    timers.backpropagate += t4.duration_since(t3).as_nanos() as u64;
 }
 
 pub fn perform_mcts(
@@ -306,8 +296,7 @@ pub fn perform_mcts_inner<'a>(
     side_two_options: Vec<MoveChoice>,
     max_time: Duration,
     arena: &mut Arena<'a>,
-) -> (MctsResult, &'a Node<'a>, Timers, ChildMap<'a>) {
-    let mut timers = Timers::default();
+) -> (MctsResult, &'a Node<'a>, ChildMap<'a>) {
     let root_node = arena.alloc(Node::new(100., &[]));
     root_node.options = OnceCell::from(NodeOptions::new_in(
         arena,
@@ -329,7 +318,6 @@ pub fn perform_mcts_inner<'a>(
                 &root_eval,
                 &mut children,
                 &mut path,
-                &mut timers,
                 &mut rng,
                 arena,
             );
@@ -379,5 +367,5 @@ pub fn perform_mcts_inner<'a>(
         iteration_count: root_node.times_visited.get(),
     };
 
-    (result, root_node, timers, children)
+    (result, root_node, children)
 }

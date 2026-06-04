@@ -3,10 +3,7 @@ use crate::engine::generate_instructions::generate_instructions_from_move_pair;
 use crate::engine::state::MoveChoice;
 use crate::instruction::Instruction;
 use crate::mcts::{MctsResult, MctsSideResult};
-use crate::perf::{
-    arena::{Arena, ConcurrentArena},
-    Timers,
-};
+use crate::perf::arena::{Arena, ConcurrentArena};
 use crate::state::State;
 use dashmap::DashMap;
 use rand::prelude::*;
@@ -316,20 +313,16 @@ fn do_mcts<'a>(
     rng: &mut Rng,
     children: &ChildMap<'a>,
     path: &mut Vec<PathStep<'a>>,
-    timers: &mut Timers,
     arena: &mut Arena<'a>,
 ) {
     path.clear();
 
-    let selection_start = Instant::now();
     let (leaf, s1_index, s2_index) = Node::selection(root, state, rng, children, path, arena);
-    let selection_end = Instant::now();
 
     let options = leaf.options.get().expect("options set during selection");
     options.s1()[s1_index as usize].add_virtual_loss();
     options.s2()[s2_index as usize].add_virtual_loss();
     let expanded = leaf.expand(state, s1_index, s2_index, rng, children, path.len(), arena);
-    let expand_end = Instant::now();
     let rollout_target = match expanded {
         Some(child) => {
             child.virtual_losses.fetch_add(1, Ordering::AcqRel);
@@ -355,13 +348,7 @@ fn do_mcts<'a>(
         }
     };
     let score = rollout_target.rollout(state, root_eval);
-    let rollout_end = Instant::now();
     Node::backpropagate(path, &rollout_target, score, state);
-    let backpropagate_end = Instant::now();
-    timers.selection += selection_end.duration_since(selection_start).as_nanos() as u64;
-    timers.expand += expand_end.duration_since(selection_end).as_nanos() as u64;
-    timers.rollout += rollout_end.duration_since(expand_end).as_nanos() as u64;
-    timers.backpropagate += backpropagate_end.duration_since(rollout_end).as_nanos() as u64;
 }
 
 pub fn perform_mcts_shared_tree(
@@ -391,8 +378,7 @@ pub fn perform_mcts_shared_tree_inner<'a>(
     max_time: Duration,
     worker_count: usize,
     base_arena: &'a ConcurrentArena,
-) -> (MctsResult, &'a Node<'a>, Timers, ChildMap<'a>) {
-    let mut timers = vec![(Timers::default(), Instant::now()); worker_count];
+) -> (MctsResult, &'a Node<'a>, ChildMap<'a>) {
     let root_eval = evaluate(state);
     let deadline = Instant::now() + max_time;
     let root: &Node = {
@@ -407,7 +393,7 @@ pub fn perform_mcts_shared_tree_inner<'a>(
         DashMap::with_capacity_and_hasher(1 << 16, foldhash::fast::RandomState::default());
 
     thread::scope(|scope| {
-        for (timer, end_instant) in timers.iter_mut() {
+        for _ in 0..worker_count {
             let root = &root;
             let children = &children;
             let started_iterations = &started_iterations;
@@ -426,7 +412,6 @@ pub fn perform_mcts_shared_tree_inner<'a>(
                             &mut rng,
                             &children,
                             &mut path,
-                            timer,
                             &mut arena,
                         );
                         if started_iterations
@@ -437,18 +422,9 @@ pub fn perform_mcts_shared_tree_inner<'a>(
                         }
                     }
                 }
-                *end_instant = std::time::Instant::now();
             });
         }
     });
-    let join_instant = Instant::now();
-    let timers = timers
-        .into_iter()
-        .fold(Timers::default(), |mut acc, (t, end_instant)| {
-            acc.add(&t);
-            acc.idle += join_instant.duration_since(end_instant).as_nanos() as u64;
-            acc
-        });
 
     let options = root.options.get().expect("root options initialized");
     let result = MctsResult {
@@ -472,5 +448,5 @@ pub fn perform_mcts_shared_tree_inner<'a>(
             .collect(),
         iteration_count: root.times_visited.load(Ordering::Acquire),
     };
-    (result, root, timers, children)
+    (result, root, children)
 }

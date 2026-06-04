@@ -1,6 +1,6 @@
 //! Structs that track relevant properties of the MCTS search
 
-use poke_engine::{mcts, mcts_threaded, Timers};
+use poke_engine::{mcts, mcts_threaded};
 use std::collections::BTreeMap;
 
 /// How a histogram should be displayed
@@ -119,14 +119,6 @@ impl Stats {
         unsafe {
             core::mem::transmute::<&mut Self, &mut [Histogram; Self::COUNT]>(self).as_mut_slice()
         }
-    }
-
-    pub fn analyze_time(&mut self, timers: Timers) {
-        self.selection_ms.inc(timers.selection / 1_000_000);
-        self.expand_ms.inc(timers.expand / 1_000_000);
-        self.rollout_ms.inc(timers.rollout / 1_000_000);
-        self.backpropagate_ms.inc(timers.backpropagate / 1_000_000);
-        self.idle_ms.inc(timers.idle / 1_000_000);
     }
 
     pub fn analyze_tree(&mut self, root: &mcts::Node, child_map: &mcts::ChildMap) {

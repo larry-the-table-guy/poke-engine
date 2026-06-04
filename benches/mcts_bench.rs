@@ -130,8 +130,8 @@ fn bench_mcts(num_threads: Option<NonZeroU32>, max_time: Duration, skip_stats: b
         let (s1_options, s2_options) = state.root_get_all_options();
         let mut proc_mem_usage = None;
 
-        let (iter_count, time_ms, sub_timers) = if let Some(num_threads) = num_threads {
-            let (r, root, timers, childmap) = mcts_threaded::perform_mcts_shared_tree_inner(
+        let (iter_count, time_ms) = if let Some(num_threads) = num_threads {
+            let (r, root, childmap) = mcts_threaded::perform_mcts_shared_tree_inner(
                 &mut state,
                 s1_options,
                 s2_options,
@@ -144,9 +144,9 @@ fn bench_mcts(num_threads: Option<NonZeroU32>, max_time: Duration, skip_stats: b
                 proc_mem_usage = memory_stats::memory_stats();
                 stats.analyze_threaded_tree(&root, &childmap);
             }
-            (r.iteration_count, time_ms, timers)
+            (r.iteration_count, time_ms)
         } else {
-            let (r, root, timers, childmap) = mcts::perform_mcts_inner(
+            let (r, root, childmap) = mcts::perform_mcts_inner(
                 &mut state,
                 s1_options,
                 s2_options,
@@ -158,7 +158,7 @@ fn bench_mcts(num_threads: Option<NonZeroU32>, max_time: Duration, skip_stats: b
                 proc_mem_usage = memory_stats::memory_stats();
                 stats.analyze_tree(&root, &childmap);
             }
-            (r.iteration_count, time_ms, timers)
+            (r.iteration_count, time_ms)
         };
 
         stats.state_hash.inc(hash);
@@ -168,7 +168,6 @@ fn bench_mcts(num_threads: Option<NonZeroU32>, max_time: Duration, skip_stats: b
         }
         stats.iter_count.inc(iter_count as u64);
         stats.total_ms.inc(time_ms);
-        stats.analyze_time(sub_timers);
         arena.reset();
     }
 
