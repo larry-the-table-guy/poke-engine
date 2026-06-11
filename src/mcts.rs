@@ -314,7 +314,7 @@ pub fn perform_mcts(
     side_two_options: Vec<MoveChoice>,
     max_time: Duration,
 ) -> MctsResult {
-    let a = crate::perf::arena::ConcurrentArena::new();
+    let a = crate::perf::arena::ArenaPool::new();
     perform_mcts_inner(
         state,
         side_one_options,

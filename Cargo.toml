@@ -28,6 +28,12 @@ clap = { version = "4.5.4", features = ["derive"] }
 rand = "0.9.1"
 foldhash = { version = "0.2.0" }
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_Memory"] }
+
 [dev-dependencies]
 memory-stats = "1.2.0"
 

@@ -3,7 +3,7 @@ use crate::engine::generate_instructions::generate_instructions_from_move_pair;
 use crate::engine::state::MoveChoice;
 use crate::instruction::Instruction;
 use crate::mcts::{MctsResult, MctsSideResult};
-use crate::perf::arena::{Arena, ConcurrentArena, Handle, SliceHandle};
+use crate::perf::arena::{Arena, ArenaPool, Handle, SliceHandle};
 use crate::state::State;
 use dashmap::DashMap;
 use rand::prelude::*;
@@ -397,7 +397,7 @@ pub fn perform_mcts_shared_tree(
     max_time: Duration,
     worker_count: usize,
 ) -> MctsResult {
-    let base_arena = ConcurrentArena::new();
+    let base_arena = ArenaPool::new();
     let r = perform_mcts_shared_tree_inner(
         state,
         side_one_options,
@@ -416,7 +416,7 @@ pub fn perform_mcts_shared_tree_inner<'a>(
     side_two_options: Vec<MoveChoice>,
     max_time: Duration,
     worker_count: usize,
-    base_arena: &'a ConcurrentArena,
+    base_arena: &'a ArenaPool,
 ) -> (MctsResult, NodeHandle<'a>, ChildMap<'a>) {
     let root_eval = evaluate(state);
     let deadline = Instant::now() + max_time;

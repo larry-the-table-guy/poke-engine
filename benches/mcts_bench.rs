@@ -114,7 +114,7 @@ fn main() {
 }
 
 fn bench_mcts(num_threads: Option<NonZeroU32>, max_time: Duration, skip_stats: bool) {
-    let mut arena = arena::ConcurrentArena::new();
+    let mut arena = arena::ArenaPool::new();
     let mut stats = Stats::new();
     let mut at_least_one = false;
 
