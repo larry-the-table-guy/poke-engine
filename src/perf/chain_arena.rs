@@ -1,4 +1,7 @@
 #![allow(dead_code)]
+//! This implementation is based on a list of backing slices (like Bumpalo).
+//! More portable than 'virt_arena'.
+
 use std::alloc::{alloc, dealloc, handle_alloc_error, Layout};
 use std::hash::Hash;
 
@@ -34,9 +37,15 @@ impl ArenaPool {
             .sum()
     }
 
+    /// Bulk free. Retains committed memory (physical pages).
     pub fn reset(&mut self) {
         // exclusive borrow means no allocations into the arena can still be alive
-        self.inner.get_mut().unwrap().reset()
+        self.inner.get_mut().unwrap().reset();
+    }
+
+    /// Bulk free. Releases committed memory (physical pages).
+    pub fn reset_and_free(&mut self) {
+        self.inner.get_mut().unwrap().reset_and_free();
     }
 }
 /// List of large allocated slices
@@ -113,6 +122,13 @@ impl Inner {
     fn reset(&mut self) {
         self.current_idx = 0;
         self.current_used_len = 0;
+    }
+    fn reset_and_free(&mut self) {
+        self.current_idx = 0;
+        self.current_used_len = 0;
+        for chunk in self.backing.drain(1..) {
+            Self::free_chunk(chunk);
+        }
     }
 }
 impl Drop for Inner {
