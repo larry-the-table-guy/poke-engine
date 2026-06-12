@@ -1,6 +1,9 @@
 //! Structs that track relevant properties of the MCTS search
 
-use poke_engine::{mcts, mcts_threaded};
+use poke_engine::{
+    arena::{Arena, Handle},
+    mcts, mcts_threaded,
+};
 use std::collections::BTreeMap;
 
 /// How a histogram should be displayed
@@ -121,16 +124,23 @@ impl Stats {
         }
     }
 
-    pub fn analyze_tree(&mut self, root: &mcts::Node, child_map: &mcts::ChildMap) {
+    pub fn analyze_tree<'a>(
+        &mut self,
+        arena: &Arena,
+        root: Handle<'a, mcts::Node<'a>>,
+        child_map: &mcts::ChildMap<'a>,
+    ) {
         self.map_len.inc(child_map.len() as u64);
         self.map_cap.inc(child_map.capacity() as u64);
         let mut tmp_node_num_children_hist = Histogram::new();
         for (k, v) in child_map.iter() {
-            tmp_node_num_children_hist.inc(k.0 as u64);
+            let v = v.resolve(arena);
+            tmp_node_num_children_hist.inc(k.0.resolve(arena) as *const _ as u64);
             self.node_len.inc(v.len() as u64);
             self.node_cap.inc(v.len() as u64);
-            for node in *v {
+            for node in v {
                 if let Some(options) = node.options.get() {
+                    let options = options.resolve(arena);
                     self.move_node_len.inc(options.s1().len() as u64);
                     self.move_node_cap.inc(options.s1().len() as u64);
                     self.move_node_len.inc(options.s2().len() as u64);
@@ -142,7 +152,7 @@ impl Stats {
                     self.move_node_cap.add(0, 2);
                     self.options_product.inc(0);
                 }
-                let ins = &node.instruction_list;
+                let ins = node.instruction_list.resolve(arena);
                 self.instr_list_len.inc(ins.len() as u64);
                 self.instr_list_cap.inc(ins.len() as u64);
 
@@ -155,30 +165,31 @@ impl Stats {
         drop(tmp_node_num_children_hist);
 
         // This can be written with an explicit stack, but the depth is just in the 10s.
-        fn visit_children(
-            node: &mcts::Node,
-            child_map: &mcts::ChildMap,
+        fn visit_children<'a>(
+            node: Handle<'a, mcts::Node<'a>>,
+            arena: &Arena,
+            child_map: &mcts::ChildMap<'a>,
             node_depth_hist: &mut Histogram,
             leaf_node_depth_hist: &mut Histogram,
             depth: usize,
         ) {
             node_depth_hist.inc(depth as u64);
-            let Some(options) = node.options.get() else {
+            let Some(options) = node.resolve(arena).options.get() else {
                 leaf_node_depth_hist.inc(depth as u64);
                 return;
             };
+            let options = options.resolve(arena);
             if options.s1().is_empty() || options.s2().is_empty() {
                 leaf_node_depth_hist.inc(depth as u64);
                 return;
             }
             for s1 in 0..options.s1().len() {
                 for s2 in 0..options.s2().len() {
-                    if let Some(entry) =
-                        child_map.get(&(node as *const mcts::Node as usize, s1 as u8, s2 as u8))
-                    {
+                    if let Some(entry) = child_map.get(&(node, s1 as u8, s2 as u8)) {
                         for child in entry.iter() {
                             visit_children(
                                 child,
+                                arena,
                                 child_map,
                                 node_depth_hist,
                                 leaf_node_depth_hist,
@@ -191,6 +202,7 @@ impl Stats {
         }
         visit_children(
             root,
+            arena,
             child_map,
             &mut self.node_depth,
             &mut self.leaf_node_depth,
@@ -198,21 +210,24 @@ impl Stats {
         );
     }
 
-    pub fn analyze_threaded_tree(
+    pub fn analyze_threaded_tree<'a>(
         &mut self,
-        root: &mcts_threaded::Node,
-        child_map: &mcts_threaded::ChildMap,
+        arena: &Arena<'a>,
+        root: Handle<'a, mcts_threaded::Node<'a>>,
+        child_map: &mcts_threaded::ChildMap<'a>,
     ) {
         self.map_len.inc(child_map.len() as u64);
         self.map_cap.inc(child_map.capacity() as u64);
         let mut tmp_node_num_children_hist = Histogram::new();
         for r in child_map.iter() {
             let (k, v) = r.pair();
-            tmp_node_num_children_hist.inc(k.0 as u64);
+            tmp_node_num_children_hist.inc(k.0.resolve(arena) as *const _ as u64);
             self.node_len.inc(v.len() as u64);
             self.node_cap.inc(v.len() as u64);
-            for node in v.iter() {
+            for node in v.resolve(arena).iter() {
+                let node = node;
                 if let Some(options) = node.options.get() {
+                    let options = options.resolve(arena);
                     self.move_node_len.inc(options.s1().len() as u64);
                     self.move_node_cap.inc(options.s1().len() as u64);
                     self.move_node_len.inc(options.s2().len() as u64);
@@ -237,29 +252,27 @@ impl Stats {
         drop(tmp_node_num_children_hist);
 
         // This can be written with an explicit stack, but the depth is just in the 10s.
-        fn visit_children(
-            node: &mcts_threaded::Node,
-            child_map: &mcts_threaded::ChildMap,
+        fn visit_children<'a>(
+            node: Handle<'a, mcts_threaded::Node<'a>>,
+            child_map: &mcts_threaded::ChildMap<'a>,
             node_depth_hist: &mut Histogram,
             leaf_node_depth_hist: &mut Histogram,
             depth: usize,
+            arena: &Arena<'a>,
         ) {
             node_depth_hist.inc(depth as u64);
-            let Some(options) = node.options.get() else {
+            let Some(options) = node.resolve(arena).options.get() else {
                 leaf_node_depth_hist.inc(depth as u64);
                 return;
             };
+            let options = options.resolve(arena);
             if options.s1().is_empty() || options.s2().is_empty() {
                 leaf_node_depth_hist.inc(depth as u64);
                 return;
             }
             for s1 in 0..options.s1().len() {
                 for s2 in 0..options.s2().len() {
-                    if let Some(entry) = child_map.get(&(
-                        node as *const mcts_threaded::Node as usize,
-                        s1 as u8,
-                        s2 as u8,
-                    )) {
+                    if let Some(entry) = child_map.get(&(node, s1 as u8, s2 as u8)) {
                         for child in entry.iter() {
                             visit_children(
                                 child,
@@ -267,6 +280,7 @@ impl Stats {
                                 node_depth_hist,
                                 leaf_node_depth_hist,
                                 depth + 1,
+                                arena,
                             );
                         }
                     }
@@ -279,6 +293,7 @@ impl Stats {
             &mut self.node_depth,
             &mut self.leaf_node_depth,
             0,
+            arena,
         );
     }
 }
