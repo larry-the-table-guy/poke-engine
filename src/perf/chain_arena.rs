@@ -51,9 +51,9 @@ impl ArenaPool {
 /// List of large allocated slices
 struct Inner {
     backing: Vec<*mut [u8]>,
-    // index into self.allocs, the slice currently being partitioned.
+    /// index into self.allocs, the slice currently being partitioned.
     current_idx: usize,
-    // how much of the current slice has been consumed
+    /// how much of the current slice has been consumed
     current_used_len: usize,
 }
 unsafe impl Send for Inner {}

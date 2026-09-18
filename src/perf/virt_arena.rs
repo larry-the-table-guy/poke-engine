@@ -24,11 +24,11 @@
 // mmap(NORESERVE) does affect commit limit (https://albertnetymk.github.io/2023/09/03/mmap/),
 // but PROT_NONE achieved the same effect on my Linux machine.
 
-// TODO: branded lifetimes to make unchecked resolve sound
+// TODO: branded lifetimes to make unchecked resolve safe and sound
 use core::{marker::PhantomData, num::NonZeroU32, ptr::NonNull};
 use std::{hash::Hash, sync::Mutex};
 
-/// Multiplier for the offset in Handle
+/// Multiplier for the offset in Handle. [1248] are practically free.
 const INDEX_SCALE: usize = 2;
 
 pub struct ArenaPool {
@@ -362,9 +362,9 @@ impl<'a, T> Hash for Handle<'a, T> {
 /// The offset is between 4 and u32::MAX.
 pub struct SliceHandle<'arena, T>(NonZeroU32, u32, PhantomData<&'arena T>);
 impl<'arena, T> SliceHandle<'arena, T> {
-    const _SCALE_ASSERT: () = assert!(size_of::<T>().is_multiple_of(INDEX_SCALE));
     /// Safety: this `Handle` must have been derived from `arena`.
     pub fn resolve(&self, arena: &Arena<'arena>) -> &'arena [T] {
+        const { assert!(size_of::<T>().is_multiple_of(INDEX_SCALE)) };
         unsafe {
             core::slice::from_raw_parts(
                 arena

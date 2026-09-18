@@ -28,10 +28,16 @@ mod chain_arena;
 /// the arena gets reset or dropped. That is memory-safe behavior, but rarely desirable.
 pub mod arena {
     cfg_select! {
-        all(not(miri), target_pointer_width = "64", any(unix, target_os = "windows")) => {
+        all(
+            any(rust_analyzer, not(miri)),
+            target_pointer_width = "64",
+            any(unix, target_os = "windows")
+        ) => {
             pub use super::virt_arena::*;
-        },
-        _ => { pub use super::chain_arena::*; }
+        }
+        _ => {
+            pub use super::chain_arena::*;
+        }
     }
 }
 
