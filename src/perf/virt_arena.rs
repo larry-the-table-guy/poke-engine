@@ -26,7 +26,13 @@
 
 // TODO: branded lifetimes to make unchecked resolve safe and sound
 use core::{marker::PhantomData, num::NonZeroU32, ptr::NonNull};
-use std::{hash::Hash, sync::Mutex};
+use std::{
+    hash::Hash,
+    sync::{
+        atomic::{AtomicU32, Ordering},
+        Mutex,
+    },
+};
 
 /// Multiplier for the offset in Handle. [1248] are practically free.
 const INDEX_SCALE: usize = 2;
@@ -412,5 +418,54 @@ impl<'arena, T> NodeOptionsHandle<'arena, T> {
             },
             _phant: PhantomData,
         }
+    }
+}
+
+/// Concurrent Option<NodeOptionsHandle>.
+/// Single-threaded code should just use OnceCell.
+pub struct LazyNodeOptionsHandle<'arena, T>(
+    AtomicU32,
+    pub(super) PhantomData<&'arena super::NodeOptions<'arena, T>>,
+);
+impl<'arena, T> LazyNodeOptionsHandle<'arena, T> {
+    pub fn empty() -> Self {
+        Self(
+            AtomicU32::new(0),
+            core::marker::PhantomData::<&'arena super::NodeOptions<'arena, T>>,
+        )
+    }
+
+    pub fn new(handle: NodeOptionsHandle<'arena, T>) -> Self {
+        Self(
+            AtomicU32::new(handle.0.get()),
+            core::marker::PhantomData::<&'arena super::NodeOptions<'arena, T>>,
+        )
+    }
+
+    /// Returns the handle if one is present
+    pub fn get(&self, _arena: &Arena<'arena>) -> Option<NodeOptionsHandle<'arena, T>> {
+        let v = self.0.load(Ordering::Acquire);
+        NonZeroU32::new(v).map(|n| NodeOptionsHandle(n, self.1))
+    }
+
+    /// If another thread races to initialize the handle, `mk_handle` may run unnecessarily.
+    pub fn get_or_init(
+        &self,
+        mk_handle: impl FnOnce() -> NodeOptionsHandle<'arena, T>,
+    ) -> NodeOptionsHandle<'arena, T> {
+        if let Some(v) = NonZeroU32::new(self.0.load(Ordering::Acquire)) {
+            return NodeOptionsHandle(v, self.1);
+        }
+
+        let new = mk_handle().0.get();
+        let idx = match self
+            .0
+            .compare_exchange(0u32, new, Ordering::Release, Ordering::Acquire)
+        {
+            Ok(_) => new,
+            Err(old) => old,
+        };
+
+        NodeOptionsHandle(NonZeroU32::new(idx).unwrap(), self.1)
     }
 }

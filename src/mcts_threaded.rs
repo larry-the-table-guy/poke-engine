@@ -9,7 +9,6 @@ use dashmap::DashMap;
 use rand::prelude::*;
 use rand::{rng, rngs::SmallRng as Rng, Rng as _};
 use std::sync::atomic::{AtomicI8, AtomicU32, Ordering};
-use std::sync::OnceLock;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -21,7 +20,8 @@ const VIRTUAL_LOSS_VISITS: u32 = 3;
 
 type NodeHandle<'a> = Handle<'a, Node<'a>>;
 pub type SharedNodeOptions<'a> = crate::perf::NodeOptions<'a, MoveNode>;
-pub type NodeOptionsHandle<'a> = crate::perf::NodeOptionsHandle<'a, MoveNode>;
+pub type NodeOptionsHandle<'a> = crate::perf::arena::NodeOptionsHandle<'a, MoveNode>;
+pub type LazyNodeOptionsHandle<'a> = crate::perf::arena::LazyNodeOptionsHandle<'a, MoveNode>;
 
 pub type ChildMapK<'a> = (NodeHandle<'a>, u8, u8);
 pub type ChildMapV<'a> = SliceHandle<'a, Node<'a>>;
@@ -109,7 +109,7 @@ pub struct Node<'a> {
     pub percentage: f32,
     pub instruction_list: SliceHandle<'a, Instruction>,
     virtual_losses: AtomicI8,
-    pub options: OnceLock<NodeOptionsHandle<'a>>,
+    pub options: LazyNodeOptionsHandle<'a>,
 }
 
 impl<'a> Node<'a> {
@@ -123,7 +123,7 @@ impl<'a> Node<'a> {
             percentage: 100.,
             instruction_list: unsafe { arena.alloc_slice([].iter().cloned()) },
             virtual_losses: AtomicI8::new(0),
-            options: OnceLock::from(SharedNodeOptions::new_in(
+            options: LazyNodeOptionsHandle::new(SharedNodeOptions::new_in(
                 arena,
                 &s1_options,
                 &s2_options,
@@ -138,11 +138,11 @@ impl<'a> Node<'a> {
             percentage,
             instruction_list,
             virtual_losses: AtomicI8::new(0),
-            options: OnceLock::new(),
+            options: LazyNodeOptionsHandle::empty(),
         }
     }
 
-    fn ensure_options(&self, arena: &mut Arena<'a>, state: &State) -> &NodeOptionsHandle<'a> {
+    fn ensure_options(&self, arena: &mut Arena<'a>, state: &State) -> NodeOptionsHandle<'a> {
         self.options.get_or_init(|| {
             let (s1, s2) = state.get_all_options();
             SharedNodeOptions::new_in(arena, &s1, &s2, MoveNode::new)
@@ -180,7 +180,7 @@ impl<'a> Node<'a> {
             let options = current
                 .resolve(arena)
                 .options
-                .get()
+                .get(arena)
                 .expect("options set during selection")
                 .resolve(arena);
 
@@ -247,7 +247,7 @@ impl<'a> Node<'a> {
         let options = leaf
             .resolve(arena)
             .options
-            .get()
+            .get(arena)
             .expect("options initialised before expand")
             .resolve(arena);
         let s1_move = &options.s1()[s1_index as usize].move_choice;
@@ -314,7 +314,7 @@ impl<'a> Node<'a> {
             let (parent, child) = (step.parent, step.child);
             let options = parent
                 .options
-                .get()
+                .get(arena)
                 .expect("path parent has options")
                 .resolve(arena);
             options.s1()[step.s1_index as usize].add_result(score);
@@ -344,7 +344,7 @@ fn do_mcts<'a>(
     let options = leaf
         .resolve(arena)
         .options
-        .get()
+        .get(arena)
         .expect("options set during selection")
         .resolve(arena);
     options.s1()[s1_index as usize].add_virtual_loss();
@@ -467,7 +467,7 @@ pub fn perform_mcts_shared_tree_inner<'a>(
     let options = root
         .resolve(&base_arena.sub_arena())
         .options
-        .get()
+        .get(&base_arena.sub_arena())
         .expect("root options initialized")
         .resolve(&base_arena.sub_arena());
     let result = MctsResult {

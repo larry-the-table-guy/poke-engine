@@ -226,7 +226,7 @@ impl Stats {
             self.node_cap.inc(v.len() as u64);
             for node in v.resolve(arena).iter() {
                 let node = node;
-                if let Some(options) = node.options.get() {
+                if let Some(options) = node.options.get(arena) {
                     let options = options.resolve(arena);
                     self.move_node_len.inc(options.s1().len() as u64);
                     self.move_node_cap.inc(options.s1().len() as u64);
@@ -261,7 +261,7 @@ impl Stats {
             arena: &Arena<'a>,
         ) {
             node_depth_hist.inc(depth as u64);
-            let Some(options) = node.resolve(arena).options.get() else {
+            let Some(options) = node.resolve(arena).options.get(arena) else {
                 leaf_node_depth_hist.inc(depth as u64);
                 return;
             };

@@ -4,6 +4,9 @@
 
 use std::alloc::{alloc, dealloc, handle_alloc_error, Layout};
 use std::hash::Hash;
+use std::marker::PhantomData;
+use std::ptr::NonNull;
+use std::sync::atomic::{AtomicPtr, Ordering};
 
 pub struct ArenaPool {
     inner: std::sync::Mutex<Inner>,
@@ -268,5 +271,66 @@ pub struct NodeOptionsHandle<'arena, T>(super::move_options::NodeOptions<'arena,
 impl<'arena, T> NodeOptionsHandle<'arena, T> {
     pub fn resolve(&self, _arena: &Arena<'arena>) -> super::move_options::NodeOptions<'arena, T> {
         self.0
+    }
+}
+
+/// Concurrent Option<NodeOptionsHandle>.
+/// Single-threaded code should just use OnceCell.
+pub struct LazyNodeOptionsHandle<'arena, T>(
+    AtomicPtr<super::move_options::Header>,
+    pub(super) PhantomData<&'arena super::NodeOptions<'arena, T>>,
+);
+impl<'arena, T> LazyNodeOptionsHandle<'arena, T> {
+    pub fn empty() -> Self {
+        Self(
+            AtomicPtr::default(),
+            core::marker::PhantomData::<&'arena super::NodeOptions<'arena, T>>,
+        )
+    }
+
+    pub fn new(handle: NodeOptionsHandle<'arena, T>) -> Self {
+        Self(
+            AtomicPtr::new(handle.0.ptr.as_ptr()),
+            core::marker::PhantomData::<&'arena super::NodeOptions<'arena, T>>,
+        )
+    }
+
+    /// Returns the handle if one is present
+    pub fn get(&self, _arena: &Arena<'arena>) -> Option<NodeOptionsHandle<'arena, T>> {
+        let v = self.0.load(Ordering::Acquire);
+        NonNull::new(v).map(|n| {
+            NodeOptionsHandle(super::move_options::NodeOptions {
+                ptr: n,
+                _phant: core::marker::PhantomData::<(T, &'arena ())>,
+            })
+        })
+    }
+
+    /// If another thread races to initialize the handle, `mk_handle` may run unnecessarily.
+    pub fn get_or_init(
+        &self,
+        mk_handle: impl FnOnce() -> NodeOptionsHandle<'arena, T>,
+    ) -> NodeOptionsHandle<'arena, T> {
+        if let Some(ptr) = NonNull::new(self.0.load(Ordering::Acquire)) {
+            return NodeOptionsHandle(super::move_options::NodeOptions {
+                ptr,
+                _phant: core::marker::PhantomData::<(T, &'arena ())>,
+            });
+        }
+        let new = mk_handle().0.ptr.as_ptr();
+        let ptr = match self.0.compare_exchange(
+            std::ptr::null_mut(),
+            new,
+            Ordering::Release,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => new,
+            Err(old) => old,
+        };
+
+        NodeOptionsHandle(super::move_options::NodeOptions {
+            ptr: NonNull::new(ptr).unwrap(),
+            _phant: core::marker::PhantomData::<(T, &'arena ())>,
+        })
     }
 }
