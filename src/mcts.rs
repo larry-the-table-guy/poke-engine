@@ -1,9 +1,8 @@
 use crate::engine::evaluate::evaluate;
 use crate::engine::generate_instructions::generate_instructions_from_move_pair;
 use crate::engine::state::MoveChoice;
-use crate::instruction::Instruction;
 use crate::perf::arena::{Arena, Handle, SliceHandle};
-use crate::state::State;
+use crate::state::{State, XorDiff};
 use foldhash::{HashMap, HashMapExt};
 use rand::{prelude::*, rng, rngs::SmallRng as Rng, Rng as _};
 use std::cell::{Cell, OnceCell};
@@ -29,18 +28,18 @@ pub struct Node<'arena> {
 
     /// How likely this node was as a result of the parent.
     pub percentage: f32,
-    // represents the instructions that led to this node from the parent
-    pub instruction_list: SliceHandle<'arena, Instruction>,
+    /// represents the instructions that led to this node from the parent
+    pub xor_list: SliceHandle<'arena, XorDiff>,
 
     /// represents the total score and number of visits for this node
     pub options: OnceCell<NodeOptionsHandle<'arena>>,
 }
 
 impl<'arena> Node<'arena> {
-    fn new(percentage: f32, instruction_list: SliceHandle<'arena, Instruction>) -> Node<'arena> {
+    fn new(percentage: f32, xor_list: SliceHandle<'arena, XorDiff>) -> Node<'arena> {
         Node {
             times_visited: Cell::new(0),
-            instruction_list,
+            xor_list,
             percentage,
             options: OnceCell::new(),
         }
@@ -82,9 +81,9 @@ impl<'arena> Node<'arena> {
             match children.get(&key) {
                 Some(child_slice) => {
                     let chosen_child = Node::sample_node(rng, arena, *child_slice);
-                    state.apply_instructions(
-                        chosen_child.resolve(arena).instruction_list.resolve(arena),
-                    );
+                    unsafe {
+                        state.apply_xor_diff(chosen_child.resolve(arena).xor_list.resolve(arena));
+                    }
                     path.push(PathStep {
                         parent: node,
                         child: chosen_child.resolve(arena),
@@ -141,12 +140,23 @@ impl<'arena> Node<'arena> {
             generate_instructions_from_move_pair(state, s1_move, s2_move, should_branch_on_damage);
         // put the most likely branches first
         new_instructions.sort_unstable_by(|l, r| l.percentage.total_cmp(&r.percentage).reverse());
+        let mut scratch_diff_buf = Vec::new();
         let collect = new_instructions
             .into_iter()
             .map(|si| {
+                scratch_diff_buf.clear();
+                for instr in &si.instruction_list {
+                    let diffs = state.convert_instruction(instr);
+                    state.apply_one_instruction(instr);
+                    scratch_diff_buf.push(diffs.0);
+                    if let Some(diff) = diffs.1 {
+                        scratch_diff_buf.push(diff);
+                    }
+                }
+                unsafe { state.apply_xor_diff(&scratch_diff_buf) };
                 (
                     si.percentage,
-                    unsafe { arena.alloc_slice(si.instruction_list.into_iter()) },
+                    unsafe { arena.alloc_slice(scratch_diff_buf.iter().copied()) },
                 )
             })
             .collect::<Vec<_>>() // TODO: remove when Node becomes DST
@@ -187,7 +197,7 @@ impl<'arena> Node<'arena> {
 
             parent.times_visited.update(|v| v + 1);
 
-            state.reverse_instructions(&child.instruction_list.resolve(arena));
+            unsafe { state.apply_xor_diff(&child.xor_list.resolve(arena)) };
         }
     }
 
@@ -287,7 +297,7 @@ fn do_mcts<'arena>(
         arena,
     );
     let rollout_target = if let Some(child) = expanded {
-        state.apply_instructions(&child.resolve(arena).instruction_list.resolve(arena));
+        unsafe { state.apply_xor_diff(&child.resolve(arena).xor_list.resolve(arena)) };
         path.push(PathStep {
             parent: leaf.resolve(arena),
             child: child.resolve(arena),
@@ -333,8 +343,8 @@ pub fn perform_mcts_inner<'a>(
     arena: &mut Arena<'a>,
 ) -> (MctsResult, NodeHandle<'a>, ChildMap<'a>) {
     let root_node = {
-        let s = unsafe { arena.alloc_slice([].iter().cloned()) };
-        arena.alloc(Node::new(100., s))
+        let x = unsafe { arena.alloc_slice([].iter().cloned()) };
+        arena.alloc(Node::new(100., x))
     };
     let _ = root_node.resolve(arena).options.set(NodeOptions::new_in(
         arena,

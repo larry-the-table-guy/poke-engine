@@ -10,6 +10,10 @@ use std::str::FromStr;
 
 pub use crate::perf::VolatileStatusBitSet;
 
+/// (offset, xor_bits)
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct XorDiff(u16, u16);
+
 #[derive(Debug, PartialEq, Copy, Clone)]
 pub enum SideReference {
     SideOne,
@@ -1467,6 +1471,10 @@ impl State {
         side_ref: &SideReference,
         volatile_status: PokemonVolatileStatus,
     ) {
+        assert!(!self
+            .get_side(&side_ref)
+            .volatile_statuses
+            .contains(&volatile_status));
         self.get_side(&side_ref)
             .volatile_statuses
             .insert(volatile_status);
@@ -1477,9 +1485,13 @@ impl State {
         side_ref: &SideReference,
         volatile_status: PokemonVolatileStatus,
     ) {
-        self.get_side(&side_ref)
-            .volatile_statuses
-            .remove(&volatile_status);
+        assert!(
+            self.get_side(&side_ref)
+                .volatile_statuses
+                .remove(&volatile_status),
+            "{:?}",
+            volatile_status
+        );
     }
 
     fn change_status(
@@ -2087,6 +2099,455 @@ impl State {
                 active.id = PokemonName::from(active.id as i16 - instruction.name_change);
             }
         }
+    }
+
+    pub unsafe fn apply_xor_diff(&mut self, diff_list: &[XorDiff]) {
+        let base = std::ptr::from_mut(self);
+        for XorDiff(offset, xor_bits) in diff_list {
+            let offset = *offset as usize;
+            debug_assert!(offset < size_of::<Self>(), "out of bounds diff");
+            let pos = base.byte_add(offset).cast::<u16>();
+            pos.write_unaligned(pos.read_unaligned() ^ *xor_bits);
+        }
+    }
+
+    /// Translates an [Instruction] to 1 or 2 xor diffs.
+    /// format: (offset, xor-diff)
+    /// TODO: can remove the need for the optional second diff by bitpacking the wish field.
+    pub fn convert_instruction(&self, instruction: &Instruction) -> (XorDiff, Option<XorDiff>) {
+        let base = self as *const Self as *const u8;
+        /// `as` cast that requires the result to have the same size
+        /// No silent truncation or extension
+        macro_rules! strict_as {
+            ($ty: ident $val: expr) => {{
+                if false {
+                    _ = unsafe { std::mem::transmute::<_, $ty>($val) };
+                }
+                $val as $ty
+            }};
+        }
+        fn ref2ptr<T>(r: &T) -> *const u8 {
+            std::ptr::from_ref(r).cast::<u8>()
+        }
+        fn zext(b: u8) -> u16 {
+            u16::from_ne_bytes([b, 0])
+        }
+        fn handle_i8(field: &i8, addend: i8) -> (*const u8, u16) {
+            (ref2ptr(field), zext(*field as u8 ^ (*field + addend) as u8))
+        }
+        fn handle_i16(field: &i16, addend: i16) -> (*const u8, u16) {
+            (ref2ptr(field), (*field ^ (*field + addend)) as u16)
+        }
+        fn handle_bool(field: &bool, new_val: bool) -> (*const u8, u16) {
+            (ref2ptr(field), zext(*field as u8 ^ new_val as u8))
+        }
+
+        let mut second_diff: Option<(*const u8, u16)> = None;
+        let (field_ptr, diff): (*const u8, u16) = match instruction {
+            Instruction::Damage(instr) => {
+                let hp = &self
+                    .get_side_immutable(&instr.side_ref)
+                    .get_active_immutable()
+                    .hp;
+                handle_i16(hp, -instr.damage_amount)
+            }
+            Instruction::Switch(instr) => {
+                let active = &self.get_side_immutable(&instr.side_ref).active_index;
+                (
+                    ref2ptr(active),
+                    zext(strict_as!(u8 instr.previous_index) ^ strict_as!(u8 instr.next_index)),
+                )
+            }
+            Instruction::ApplyVolatileStatus(instr) => {
+                // NOTE: this body depends on implementation details of [VolatileStatusBitSet]
+                let v = instr.volatile_status as u16;
+                let map = &self.get_side_immutable(&instr.side_ref).volatile_statuses;
+
+                let byte_pos = (1u128 << v)
+                    .to_ne_bytes()
+                    .iter()
+                    .position(|b| *b != 0)
+                    .unwrap();
+                let d = (
+                    unsafe { ref2ptr(map).byte_add(byte_pos) },
+                    zext(1u8 << (v % 8)),
+                );
+                d
+            }
+            Instruction::RemoveVolatileStatus(instr) => {
+                // NOTE: this body depends on implementation details of [VolatileStatusBitSet]
+                let v = instr.volatile_status as u16;
+                let map = &self.get_side_immutable(&instr.side_ref).volatile_statuses;
+
+                let byte_pos = (1u128 << v)
+                    .to_ne_bytes()
+                    .iter()
+                    .position(|b| if *b != 0 { true } else { false })
+                    .unwrap();
+                let d = (
+                    unsafe { ref2ptr(map).byte_add(byte_pos) },
+                    zext(1u8 << (v % 8)),
+                );
+                d
+            }
+            Instruction::ChangeStatus(instr) => {
+                let status =
+                    &self.get_side_immutable(&instr.side_ref).pokemon[instr.pokemon_index].status;
+                const { assert!(size_of::<PokemonStatus>() == 1) }
+                (
+                    ref2ptr(status),
+                    zext(strict_as!(u8 instr.old_status) ^ strict_as!(u8 instr.new_status)),
+                )
+            }
+            Instruction::Boost(instr) => {
+                let side = self.get_side_immutable(&instr.side_ref);
+                let stat = match &instr.stat {
+                    PokemonBoostableStat::Attack => &side.attack_boost,
+                    PokemonBoostableStat::Defense => &side.defense_boost,
+                    PokemonBoostableStat::SpecialAttack => &side.special_attack_boost,
+                    PokemonBoostableStat::SpecialDefense => &side.special_defense_boost,
+                    PokemonBoostableStat::Speed => &side.speed_boost,
+                    PokemonBoostableStat::Evasion => &side.evasion_boost,
+                    PokemonBoostableStat::Accuracy => &side.accuracy_boost,
+                };
+                handle_i8(stat, instr.amount)
+            }
+            Instruction::ChangeSideCondition(instr) => {
+                let side = self.get_side_immutable(&instr.side_ref);
+                let field = match &instr.side_condition {
+                    PokemonSideCondition::AuroraVeil => &side.side_conditions.aurora_veil,
+                    PokemonSideCondition::CraftyShield => &side.side_conditions.crafty_shield,
+                    PokemonSideCondition::HealingWish => &side.side_conditions.healing_wish,
+                    PokemonSideCondition::LightScreen => &side.side_conditions.light_screen,
+                    PokemonSideCondition::LuckyChant => &side.side_conditions.lucky_chant,
+                    PokemonSideCondition::LunarDance => &side.side_conditions.lunar_dance,
+                    PokemonSideCondition::MatBlock => &side.side_conditions.mat_block,
+                    PokemonSideCondition::Mist => &side.side_conditions.mist,
+                    PokemonSideCondition::Protect => &side.side_conditions.protect,
+                    PokemonSideCondition::QuickGuard => &side.side_conditions.quick_guard,
+                    PokemonSideCondition::Reflect => &side.side_conditions.reflect,
+                    PokemonSideCondition::Safeguard => &side.side_conditions.safeguard,
+                    PokemonSideCondition::Spikes => &side.side_conditions.spikes,
+                    PokemonSideCondition::Stealthrock => &side.side_conditions.stealth_rock,
+                    PokemonSideCondition::StickyWeb => &side.side_conditions.sticky_web,
+                    PokemonSideCondition::Tailwind => &side.side_conditions.tailwind,
+                    PokemonSideCondition::ToxicCount => &side.side_conditions.toxic_count,
+                    PokemonSideCondition::ToxicSpikes => &side.side_conditions.toxic_spikes,
+                    PokemonSideCondition::WideGuard => &side.side_conditions.wide_guard,
+                };
+                handle_i8(field, instr.amount)
+            }
+            Instruction::ChangeVolatileStatusDuration(instr) => {
+                let side = self.get_side_immutable(&instr.side_ref);
+                let field = match instr.volatile_status {
+                    PokemonVolatileStatus::CONFUSION => &side.volatile_status_durations.confusion,
+                    PokemonVolatileStatus::LOCKEDMOVE => &side.volatile_status_durations.lockedmove,
+                    PokemonVolatileStatus::ENCORE => &side.volatile_status_durations.encore,
+                    PokemonVolatileStatus::SLOWSTART => &side.volatile_status_durations.slowstart,
+                    PokemonVolatileStatus::TAUNT => &side.volatile_status_durations.taunt,
+                    PokemonVolatileStatus::YAWN => &side.volatile_status_durations.yawn,
+                    _ => panic!(
+                        "Invalid volatile status for increment_volatile_status_duration: {:?}",
+                        instr.volatile_status
+                    ),
+                };
+                handle_i8(field, instr.amount)
+            }
+            Instruction::ChangeWeather(instr) => {
+                let diff = unsafe {
+                    std::mem::transmute::<_, u16>(StateWeather {
+                        weather_type: instr.new_weather,
+                        turns_remaining: instr.new_weather_turns_remaining,
+                    }) ^ std::mem::transmute::<_, u16>(StateWeather {
+                        weather_type: instr.previous_weather,
+                        turns_remaining: instr.previous_weather_turns_remaining,
+                    })
+                };
+                (ref2ptr(&self.weather), diff)
+            }
+            Instruction::DecrementWeatherTurnsRemaining => {
+                let field = &self.weather.turns_remaining;
+                handle_i8(field, -1)
+            }
+            Instruction::ChangeTerrain(instr) => {
+                const { assert!(size_of::<StateTerrain>() == 2) }
+                let diff = unsafe {
+                    std::mem::transmute::<_, u16>(StateTerrain {
+                        terrain_type: instr.new_terrain,
+                        turns_remaining: instr.new_terrain_turns_remaining,
+                    }) ^ std::mem::transmute::<_, u16>(StateTerrain {
+                        terrain_type: instr.previous_terrain,
+                        turns_remaining: instr.previous_terrain_turns_remaining,
+                    })
+                };
+                (ref2ptr(&self.terrain), diff)
+            }
+            Instruction::DecrementTerrainTurnsRemaining => {
+                let field = &self.terrain.turns_remaining;
+                handle_i8(field, -1)
+            }
+            Instruction::ChangeType(instr) => {
+                let types = &self
+                    .get_side_immutable(&instr.side_ref)
+                    .get_active_immutable()
+                    .types;
+
+                let diff = unsafe {
+                    std::mem::transmute::<_, u16>(instr.new_types)
+                        ^ std::mem::transmute::<_, u16>(instr.old_types)
+                };
+                (ref2ptr(types), diff)
+            }
+            Instruction::ChangeAbility(instr) => {
+                let ability = &self
+                    .get_side_immutable(&instr.side_ref)
+                    .get_active_immutable()
+                    .ability;
+                const { assert!(size_of::<Abilities>() == 2) };
+                let diff = strict_as!(i16 * ability)
+                    ^ Abilities::from(*ability as i16 + instr.ability_change) as i16;
+                (ref2ptr(ability), diff.cast_unsigned())
+            }
+            Instruction::Heal(instr) => {
+                let hp = &self
+                    .get_side_immutable(&instr.side_ref)
+                    .get_active_immutable()
+                    .hp;
+                handle_i16(hp, instr.heal_amount)
+            }
+            Instruction::ChangeItem(instr) => {
+                let field = &self
+                    .get_side_immutable(&instr.side_ref)
+                    .get_active_immutable()
+                    .item;
+                (
+                    ref2ptr(field),
+                    zext(strict_as!(u8 instr.current_item) ^ strict_as!(u8 instr.new_item)),
+                )
+            }
+            Instruction::ChangeAttack(instr) => {
+                let field = &self
+                    .get_side_immutable(&instr.side_ref)
+                    .get_active_immutable()
+                    .attack;
+                handle_i16(field, instr.amount)
+            }
+            Instruction::ChangeDefense(instr) => {
+                let field = &self
+                    .get_side_immutable(&instr.side_ref)
+                    .get_active_immutable()
+                    .defense;
+                handle_i16(field, instr.amount)
+            }
+            Instruction::ChangeSpecialAttack(instr) => {
+                let field = &self
+                    .get_side_immutable(&instr.side_ref)
+                    .get_active_immutable()
+                    .special_attack;
+                handle_i16(field, instr.amount)
+            }
+            Instruction::ChangeSpecialDefense(instr) => {
+                let field = &self
+                    .get_side_immutable(&instr.side_ref)
+                    .get_active_immutable()
+                    .special_defense;
+                handle_i16(field, instr.amount)
+            }
+            Instruction::ChangeSpeed(instr) => {
+                let field = &self
+                    .get_side_immutable(&instr.side_ref)
+                    .get_active_immutable()
+                    .speed;
+                handle_i16(field, instr.amount)
+            }
+            Instruction::EnableMove(instr) => {
+                let field = &self
+                    .get_side_immutable(&instr.side_ref)
+                    .get_active_immutable()
+                    .moves[&instr.move_index]
+                    .disabled;
+                handle_bool(field, false)
+            }
+            Instruction::DisableMove(instr) => {
+                let field = &self
+                    .get_side_immutable(&instr.side_ref)
+                    .get_active_immutable()
+                    .moves[&instr.move_index]
+                    .disabled;
+                handle_bool(field, true)
+            }
+            Instruction::ChangeWish(instr) => {
+                let wish = &self.get_side_immutable(&instr.side_ref).wish;
+                second_diff = Some(handle_i8(&wish.0, 2 - wish.0));
+                handle_i16(&wish.1, instr.wish_amount_change)
+            }
+            Instruction::DecrementWish(instr) => {
+                let field = &self.get_side_immutable(&instr.side_ref).wish.0;
+                handle_i8(field, -1)
+            }
+            Instruction::SetFutureSight(instr) => {
+                let field = &self.get_side_immutable(&instr.side_ref).future_sight;
+                let diff = unsafe {
+                    std::mem::transmute::<_, u16>(*field)
+                        ^ std::mem::transmute::<_, u16>((3i8, instr.pokemon_index))
+                };
+                (ref2ptr(field), diff)
+            }
+            Instruction::DecrementFutureSight(instr) => {
+                let field = &self.get_side_immutable(&instr.side_ref).future_sight.0;
+                handle_i8(field, -1)
+            }
+            Instruction::DamageSubstitute(instr) => {
+                let field = &self.get_side_immutable(&instr.side_ref).substitute_health;
+                handle_i16(field, -instr.damage_amount)
+            }
+            Instruction::ChangeSubstituteHealth(instr) => {
+                let field = &self.get_side_immutable(&instr.side_ref).substitute_health;
+                handle_i16(field, instr.health_change)
+            }
+            Instruction::SetRestTurns(instr) => {
+                let field = &self.get_side_immutable(&instr.side_ref).pokemon[instr.pokemon_index]
+                    .rest_turns;
+                (
+                    ref2ptr(field),
+                    zext(instr.new_turns.cast_unsigned() ^ instr.previous_turns.cast_unsigned()),
+                )
+            }
+            Instruction::SetSleepTurns(instr) => {
+                let field = &self.get_side_immutable(&instr.side_ref).pokemon[instr.pokemon_index]
+                    .sleep_turns;
+                (
+                    ref2ptr(field),
+                    zext(instr.new_turns.cast_unsigned() ^ instr.previous_turns.cast_unsigned()),
+                )
+            }
+            Instruction::DecrementRestTurns(instr) => {
+                let field = &self
+                    .get_side_immutable(&instr.side_ref)
+                    .get_active_immutable()
+                    .rest_turns;
+                handle_i8(field, -1)
+            }
+            Instruction::ToggleTrickRoom(instr) => {
+                let field = &self.trick_room;
+                let diff = unsafe {
+                    std::mem::transmute::<_, u16>(StateTrickRoom {
+                        active: true,
+                        turns_remaining: instr.new_trickroom_turns_remaining
+                            ^ instr.previous_trickroom_turns_remaining,
+                    })
+                };
+                (ref2ptr(field), diff)
+            }
+            Instruction::DecrementTrickRoomTurnsRemaining => {
+                let field = &self.trick_room.turns_remaining;
+                handle_i8(field, -1)
+            }
+            Instruction::ToggleSideOneForceSwitch => {
+                let field = &self.side_one.force_switch;
+                handle_bool(field, !*field)
+            }
+            Instruction::ToggleSideTwoForceSwitch => {
+                let field = &self.side_two.force_switch;
+                handle_bool(field, !*field)
+            }
+            Instruction::SetSideOneMoveSecondSwitchOutMove(instr) => {
+                let field = &self.side_one.switch_out_move_second_saved_move;
+                (
+                    ref2ptr(field),
+                    strict_as!(u16 instr.new_choice) ^ strict_as!(u16 instr.previous_choice),
+                )
+            }
+            Instruction::SetSideTwoMoveSecondSwitchOutMove(instr) => {
+                let field = &self.side_two.switch_out_move_second_saved_move;
+                (
+                    ref2ptr(field),
+                    strict_as!(u16 instr.new_choice) ^ strict_as!(u16 instr.previous_choice),
+                )
+            }
+            Instruction::ToggleBatonPassing(instr) => {
+                let field = &self.get_side_immutable(&instr.side_ref).baton_passing;
+                handle_bool(field, !*field)
+            }
+            Instruction::ToggleShedTailing(instr) => {
+                let field = &self.get_side_immutable(&instr.side_ref).shed_tailing;
+                handle_bool(field, !*field)
+            }
+            Instruction::ToggleTerastallized(instr) => {
+                let field = &self
+                    .get_side_immutable(&instr.side_ref)
+                    .get_active_immutable()
+                    .terastallized;
+                handle_bool(field, !*field)
+            }
+            Instruction::SetLastUsedMove(instr) => {
+                let field = &self.get_side_immutable(&instr.side_ref).last_used_move;
+                let diff = unsafe {
+                    std::mem::transmute::<_, u16>(instr.previous_last_used_move)
+                        ^ std::mem::transmute::<_, u16>(instr.last_used_move)
+                };
+                (ref2ptr(field), diff)
+            }
+            Instruction::ChangeDamageDealtDamage(instr) => {
+                let field = &self.get_side_immutable(&instr.side_ref).damage_dealt.damage;
+                handle_i16(field, instr.damage_change)
+            }
+            Instruction::ChangeDamageDealtMoveCatagory(instr) => {
+                let field = &self
+                    .get_side_immutable(&instr.side_ref)
+                    .damage_dealt
+                    .move_category;
+                (
+                    ref2ptr(field),
+                    zext(
+                        strict_as!(u8 instr.previous_move_category)
+                            ^ strict_as!(u8 instr.move_category),
+                    ),
+                )
+            }
+            Instruction::ToggleDamageDealtHitSubstitute(instr) => {
+                let field = &self
+                    .get_side_immutable(&instr.side_ref)
+                    .damage_dealt
+                    .hit_substitute;
+                handle_bool(field, !*field)
+            }
+            Instruction::DecrementPP(instr) => {
+                let field = &self
+                    .get_side_immutable(&instr.side_ref)
+                    .get_active_immutable()
+                    .moves[&instr.move_index]
+                    .pp;
+                handle_i8(field, -instr.amount)
+            }
+            Instruction::FormeChange(instr) => {
+                let field = &self
+                    .get_side_immutable(&instr.side_ref)
+                    .get_active_immutable()
+                    .id;
+                let new = PokemonName::from(*field as i16 + instr.name_change);
+                (
+                    ref2ptr(field),
+                    strict_as!(u16 new) ^ strict_as!(u16 * field),
+                )
+            }
+        };
+
+        assert!(
+            (base.addr()..base.addr() + size_of::<State>()).contains(&field_ptr.addr()),
+            "field pointer must be inside the State"
+        );
+        if let Some((field_ptr, _)) = second_diff {
+            assert!(
+                (base.addr()..base.addr() + size_of::<State>()).contains(&field_ptr.addr()),
+                "field pointer must be inside the State"
+            );
+        }
+        let offset = unsafe { field_ptr.byte_offset_from_unsigned(base) };
+
+        let second_diff = second_diff
+            .map(|(p, d)| XorDiff(unsafe { p.byte_offset_from_unsigned(base) } as u16, d));
+        (XorDiff(offset as u16, diff), second_diff)
     }
 }
 impl State {

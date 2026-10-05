@@ -152,7 +152,7 @@ impl Stats {
                     self.move_node_cap.add(0, 2);
                     self.options_product.inc(0);
                 }
-                let ins = node.instruction_list.resolve(arena);
+                let ins = node.xor_list.resolve(arena);
                 self.instr_list_len.inc(ins.len() as u64);
                 self.instr_list_cap.inc(ins.len() as u64);
 
