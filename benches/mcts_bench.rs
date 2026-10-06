@@ -3,7 +3,7 @@ use core::num::NonZeroU32;
 use core::time::Duration;
 use std::io::{stdout, IsTerminal, Read, Write};
 
-use poke_engine::state::State;
+use poke_engine::state::{self, State};
 use poke_engine::{arena, instruction};
 use poke_engine::{mcts, mcts_threaded};
 
@@ -260,7 +260,7 @@ impl ElemSizes {
         child_map_kv: size_of::<(mcts::ChildMapK, mcts::ChildMapV)>() as u32,
         node: size_of::<mcts::Node>() as u32,
         move_node: size_of::<mcts::MoveNode>() as u32,
-        instruction: size_of::<instruction::Instruction>() as u32,
+        instruction: size_of::<state::XorDiff>() as u32,
     };
     pub const CURRENT_THREADED: Self = Self {
         child_map_kv: size_of::<(mcts_threaded::ChildMapK, mcts_threaded::ChildMapV)>() as u32,
